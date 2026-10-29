@@ -1,0 +1,5 @@
+/target/
+/output/
+/tmp/
+__pycache__/
+/docs
