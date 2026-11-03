@@ -52,3 +52,8 @@ cargo build --release --no-default-features --features wgpu
 ## 局限
 
 目前仅支持 x86（32 位 PE），不支持 x64。
+
+
+## 社区
+
+[Linux DO](https://linux.do/)
