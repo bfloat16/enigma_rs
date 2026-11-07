@@ -18,10 +18,6 @@ pub struct Unpacked {
 /// Recover the executable and embedded virtual files without executing the input.
 pub fn unpack(input: &[u8], mode: Option<search::Mode>) -> Result<Unpacked> {
     let pe = Pe::parse(input)?;
-    ensure!(
-        !pe.is_64,
-        "unpacking supports the validated x86 Loader profile"
-    );
     let config = config::parse(&pe)?;
     let ctx = config.ctx.as_ref().context("unknown ctx layout")?;
     let layout = config.layout.as_ref().context("unknown Loader layout")?;

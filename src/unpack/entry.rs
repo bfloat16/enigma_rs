@@ -19,7 +19,6 @@ pub(crate) struct Entry {
 
 /// Extract the decoded RVA-mapped DLL without configuration-layout recovery.
 pub fn extract_runtime(pe: &Pe<'_>) -> Result<Vec<u8>> {
-    ensure!(!pe.is_64, "runtime extraction supports x86 only");
     let runtime = parse(pe)?
         .loader
         .context("input contains no embedded runtime")?;
@@ -201,7 +200,7 @@ fn host_imports(pe: &Pe<'_>, base: u32) -> Result<std::collections::HashMap<u32,
 
 pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
     if pe.is_64 {
-        return metadata64(pe);
+        return super::entry64::parse(pe);
     }
     let base = u32::try_from(pe.image_base)?;
     let mut image = Image::default();
@@ -372,47 +371,4 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
         );
     }
     bail!("entry instruction bound exceeded")
-}
-
-// The library retains metadata-only inspection of an unencrypted PE32+ ABI
-// call. Full unpacking continues to reject x64 in lib.rs.
-fn metadata64(pe: &Pe<'_>) -> Result<Entry> {
-    let mut pc = pe.entry;
-    let mut metadata = None;
-    for _ in 0..128 {
-        let bytes: Vec<_> = (0..15)
-            .map_while(|n| pe.read(pc + n, 1).ok().map(|b| b[0]))
-            .collect();
-        let i = iced_x86::Decoder::with_ip(64, &bytes, pc as u64, iced_x86::DecoderOptions::NONE)
-            .decode();
-        ensure!(!i.is_invalid(), "invalid x64 metadata argument instruction");
-        if i.mnemonic() == M::Mov
-            && i.op_kind(0) == OpKind::Register
-            && i.op_register(0).full_register() == R::R8
-        {
-            ensure!(
-                matches!(
-                    i.op_kind(1),
-                    OpKind::Immediate32to64 | OpKind::Immediate64 | OpKind::Immediate32
-                ),
-                "x64 metadata argument is not constant"
-            );
-            metadata = Some(u32::try_from(i.immediate(1))?);
-        }
-        match i.flow_control() {
-            FlowControl::UnconditionalBranch => pc = i.near_branch_target() as u32,
-            FlowControl::Next => pc = i.next_ip32(),
-            FlowControl::Call
-            | FlowControl::IndirectCall
-            | FlowControl::Return
-            | FlowControl::IndirectBranch => {
-                return Ok(Entry {
-                    loader: None,
-                    metadata: metadata.context("x64 metadata argument missing")?,
-                });
-            }
-            _ => bail!("unsupported x64 metadata control flow"),
-        }
-    }
-    bail!("x64 metadata instruction bound exceeded")
 }

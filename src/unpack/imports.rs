@@ -51,6 +51,15 @@ impl<'a> Cursor<'a> {
 }
 
 pub fn parse_records(plain: &[u8], key: &[u8; 16], flag_size: usize) -> Result<Vec<Import>> {
+    parse_records_arch(plain, key, flag_size, false)
+}
+
+pub fn parse_records_arch(
+    plain: &[u8],
+    key: &[u8; 16],
+    flag_size: usize,
+    is_64: bool,
+) -> Result<Vec<Import>> {
     let idea = Idea::new(key);
     let mut c = Cursor {
         bytes: plain,
@@ -76,7 +85,16 @@ pub fn parse_records(plain: &[u8], key: &[u8; 16], flag_size: usize) -> Result<V
         let (name, ordinal) = if flags & 4 != 0 {
             (Some(c.name(&idea)?), None)
         } else {
-            let n = c.dword()? & 0x7fffffff;
+            let n = if is_64 {
+                let value = u64::from_le_bytes(c.read(8)?.try_into()?);
+                ensure!(
+                    value & 0x7fff_ffff_ffff_0000 == 0,
+                    "invalid x64 import ordinal"
+                );
+                value as u32
+            } else {
+                c.dword()? & 0x7fffffff
+            };
             ensure!(n <= u16::MAX as u32, "invalid import ordinal");
             (None, Some(n as u16))
         };
@@ -90,7 +108,9 @@ pub fn parse_records(plain: &[u8], key: &[u8; 16], flag_size: usize) -> Result<V
                 "unsupported first import reference field {first:#x}"
             );
             ensure!(
-                iat_rva > 0 && iat_rva.is_multiple_of(4) && slots.insert(iat_rva),
+                iat_rva > 0
+                    && iat_rva.is_multiple_of(if is_64 { 8 } else { 4 })
+                    && slots.insert(iat_rva),
                 "invalid or duplicate IAT slot"
             );
             symbols.push(Import {

@@ -73,9 +73,12 @@ def u32(b, at):
 def inspect_pe(b):
     assert b[:2] == b"MZ"
     nt = u32(b, 0x3C)
-    assert b[nt : nt + 4] == b"PE\0\0" and u16(b, nt + 4) == 0x14C
+    assert b[nt : nt + 4] == b"PE\0\0" and u16(b, nt + 4) in (0x14C, 0x8664)
     opt = nt + 24
-    assert u16(b, opt) == 0x10B
+    is_64 = u16(b, nt + 4) == 0x8664
+    assert u16(b, opt) == (0x20B if is_64 else 0x10B)
+    word = 8 if is_64 else 4
+    ordinal = 1 << (word * 8 - 1)
     sections = []
     table = opt + u16(b, nt + 20)
     for i in range(u16(b, nt + 6)):
@@ -94,7 +97,7 @@ def inspect_pe(b):
 
     entry = u32(b, opt + 16)
     assert any(rva <= entry < rva + max(vs, rs) and flags & 0x20000000 for rva, vs, raw, rs, flags in sections)
-    directory = opt + 96
+    directory = opt + (112 if is_64 else 96)
     at = u32(b, directory + 8)
     imports = 0
     groups = 0
@@ -107,16 +110,16 @@ def inspect_pe(b):
         p = d[0]
         iat = d[4]
         while True:
-            thunk = u32(read(p, 4), 0)
-            assert u32(read(iat, 4), 0) == thunk
+            thunk = int.from_bytes(read(p, word), "little")
+            assert int.from_bytes(read(iat, word), "little") == thunk
             if not thunk:
                 break
-            if not thunk & 0x80000000:
+            if not thunk & ordinal:
                 name = read(thunk + 2, 1)
                 assert 32 <= name[0] < 127
             imports += 1
-            p += 4
-            iat += 4
+            p += word
+            iat += word
         groups += 1
         at += 20
         assert groups < 65536
@@ -130,11 +133,31 @@ def inspect_pe(b):
             assert n >= 8 and n % 2 == 0 and p + n <= len(reloc)
             for i in range(p + 8, p + n, 2):
                 v = u16(reloc, i)
-                assert v >> 12 in [0, 3]
-                if v >> 12 == 3:
-                    read(page + (v & 0xFFF), 4)
+                assert v >> 12 in [0, 10 if is_64 else 3]
+                if v >> 12 != 0:
+                    read(page + (v & 0xFFF), word)
                     reloc_count += 1
             p += n
+    if is_64:
+        exception_rva, exception_size = struct.unpack_from("<2I", b, directory + 24)
+        assert exception_rva and exception_size % 12 == 0
+        previous = 0
+        for begin, end, unwind in struct.iter_unpack("<3I", read(exception_rva, exception_size)):
+            assert previous <= begin < end
+            assert any(rva <= begin < end <= rva + max(vs, rs) and flags & 0x20000000
+                       for rva, vs, raw, rs, flags in sections)
+            assert read(unwind, 1)[0] & 7 in (1, 2)
+            previous = end
+        tls_rva, tls_size = struct.unpack_from("<2I", b, directory + 72)
+        if tls_rva:
+            assert tls_size == 40
+            base = struct.unpack_from("<Q", b, opt + 24)[0]
+            start, end, index, callbacks, zero, flags = struct.unpack("<4Q2I", read(tls_rva, 40))
+            assert start <= end
+            read(start - base, end - start)
+            assert any(rva <= index - base < rva + max(vs, rs) and flags & 0x80000000
+                       for rva, vs, raw, rs, flags in sections)
+            assert int.from_bytes(read(callbacks - base, 8), "little") == 0
     field = opt + 64
     total = 0
     for i in range(0, len(b), 2):

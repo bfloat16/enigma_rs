@@ -50,8 +50,7 @@ cargo build --release --no-default-features --features wgpu
 默认自动选择搜索后端，`--mod` 仅用于解包。`devirt` 的 RVA 使用 `scan` 输出的十六进制值；省略 `-o` 则打印汇编，输出扩展名为 `.bin` 则保存机器码。分析输出不覆盖已有文件，生成代码可能仍引用原映像，并非独立可执行文件。
 
 ## 局限
-
-目前仅支持 x86（32 位 PE），不支持 x64。
+`scan` / `devirt` 分析模式目前仅支持 x86。
 
 
 ## 社区

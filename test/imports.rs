@@ -78,3 +78,22 @@ fn real_dword_flags_include_high_bits_and_a_dword_terminator() {
     assert_eq!(imports[0].iat_rva, 0x2c00ac);
     assert!(imports::parse_records(&data, &key, 1).is_err());
 }
+
+#[test]
+fn x64_ordinals_are_qwords_but_references_remain_rvas() {
+    let mut data = vec![1, 12, 0];
+    data.extend(bytes("baf09a5a7cb5d92d8f7f41fd"));
+    data.push(0);
+    let ordinal_at = data.len();
+    data.extend(0x8000000000000158u64.to_le_bytes());
+    data.extend(1u16.to_le_bytes());
+    data.extend(0u32.to_le_bytes());
+    data.extend(0x363088u32.to_le_bytes());
+    data.push(255);
+    let result = imports::parse_records_arch(&data, &key(), 1, true).unwrap();
+    assert_eq!(result[0].ordinal, Some(0x158));
+    assert_eq!(result[0].iat_rva, 0x363088);
+    assert!(imports::parse_records(&data, &key(), 1).is_err());
+    data[ordinal_at + 4] = 1;
+    assert!(imports::parse_records_arch(&data, &key(), 1, true).is_err());
+}

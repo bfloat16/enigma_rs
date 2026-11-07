@@ -224,10 +224,9 @@ fn append_tls(
 }
 
 pub fn rebuild(pe: &Pe<'_>, config: &Configuration, recovered: &[Recovered]) -> Result<Vec<u8>> {
-    ensure!(
-        !pe.is_64,
-        "rebuild supports the validated x86 Loader profile"
-    );
+    if pe.is_64 {
+        return super::x64::rebuild(pe, config, recovered);
+    }
     let ctx = config.ctx.as_ref().context("ctx missing")?;
     let layout = config.layout.as_ref().context("unknown Loader layout")?;
     let loader = config.loader.as_ref().context("Loader missing")?;

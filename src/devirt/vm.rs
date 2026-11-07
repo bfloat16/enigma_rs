@@ -33,6 +33,28 @@ pub struct Layout {
 }
 impl Layout {
     pub fn parse(image: &[u8]) -> Result<Self> {
+        if crate::common::pe::Pe::parse(image)?.is_64 {
+            let runtime = super::x64::Runtime::parse(image)?;
+            let copies = runtime.projection(image)?;
+            // The scalar blocks below are accepted only with the x64 reader's
+            // verified sizes. Unknown layouts are never interpreted as x86.
+            ensure!(
+                copies.iter().map(|p| p.1).collect::<Vec<_>>() == [0xc4, 0xa0, 8, 0xf4f8],
+                "unsupported x64 serialized block layout"
+            );
+            let data = copies[0].0;
+            let entry = copies[1].0;
+            return Ok(Self {
+                copies,
+                data,
+                entry,
+                entry_cipher: None,
+                tls: entry + 0x88,
+                relocations: data + 0x58,
+                machine_suffix: runtime.section_suffix()?,
+                trampoline: 0,
+            });
+        }
         let bootstrap = super::loader::Bootstrap::parse(image)?;
         let tokens = Tokens::parse(image)?;
         let copies = tokens.projection()?;
