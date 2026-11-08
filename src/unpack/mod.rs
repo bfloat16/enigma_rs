@@ -2,14 +2,14 @@
 
 pub mod config;
 pub mod cpu_search;
-pub(crate) mod entry;
-mod entry64;
+mod entry;
 pub mod extract;
 pub mod imports;
 pub mod rebuild;
 pub mod search;
 mod task;
 mod x64;
+mod x86;
 
 #[cfg(all(feature = "cuda", cuda_available))]
 pub mod cuda_search;

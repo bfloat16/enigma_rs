@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 
-use super::entry;
+use super::entry::Entry;
 use crate::{
     common::{
         codec::{self, expanded_size},
@@ -8,9 +8,29 @@ use crate::{
         io::{take, u32_at},
         pe::Pe,
     },
-    devirt::vm,
+    devirt::{x64::runtime::Runtime, x86::vm},
 };
 
+#[derive(Clone, Debug)]
+pub struct EntryCipher {
+    pub offset: usize,
+    pub bias: u32,
+    pub length: usize,
+    pub digest: usize,
+}
+
+/// Configuration projection and offsets recovered from runtime consumers.
+#[derive(Clone, Debug)]
+pub struct Layout {
+    pub copies: Vec<(usize, usize)>,
+    pub data: usize,
+    pub relocations: usize,
+    pub entry: usize,
+    pub entry_cipher: Option<EntryCipher>,
+    pub tls: usize,
+    pub machine_suffix: usize,
+    pub trampoline: u32,
+}
 #[derive(Clone, Debug)]
 pub struct Descriptor {
     pub index: usize,
@@ -32,7 +52,7 @@ pub struct Configuration {
     pub entry_patch: Option<super::extract::Recovered>,
     pub ctx: Option<Vec<u8>>,
     pub loader: Option<Vec<u8>>,
-    pub layout: Option<vm::Layout>,
+    pub layout: Option<Layout>,
 }
 
 fn derive_key(pe: &Pe<'_>, count: usize, skip_shared: bool) -> Result<[u8; 16]> {
@@ -58,9 +78,18 @@ fn derive_key(pe: &Pe<'_>, count: usize, skip_shared: bool) -> Result<[u8; 16]> 
 }
 
 pub fn parse(pe: &Pe<'_>) -> Result<Configuration> {
-    let entry = entry::parse(pe)?;
+    let entry = Entry::parse(pe)?;
     let loader = entry.loader;
-    let layout = loader.as_deref().map(vm::Layout::parse).transpose()?;
+    let layout = loader
+        .as_deref()
+        .map(|image| {
+            if pe.is_64 {
+                Runtime::parse(image)?.layout(image)
+            } else {
+                vm::layout(image)
+            }
+        })
+        .transpose()?;
     decode_metadata(pe, entry.metadata, loader, layout)
         .with_context(|| format!("metadata at {:#x}", entry.metadata))
 }
@@ -69,7 +98,7 @@ fn decode_metadata(
     pe: &Pe<'_>,
     rva: u32,
     loader: Option<Vec<u8>>,
-    layout: Option<vm::Layout>,
+    layout: Option<Layout>,
 ) -> Result<Configuration> {
     let header = pe.read(rva, 28)?;
     let count = u32_at(header, 0)? as usize;

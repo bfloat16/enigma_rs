@@ -19,6 +19,7 @@ cubecl-cuda = { version = "=0.10.0", default-features = false, features = ["std"
 cudarc = { version = "=0.19.10", default-features = false, features = ["cuda-13040", "dynamic-loading"], optional = true }
 cubecl-wgpu = { version = "=0.10.0", default-features = false, features = ["std"], optional = true }
 md5 = "0.8"
+rustc-hash = "2.1"
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "block_encoder", "instr_info", "code_asm", "intel"] }
 indicatif = { version = "0.18", default-features = false }
 

@@ -37,6 +37,14 @@ pub fn put_u32_at(data: &mut [u8], offset: usize, value: u32) -> Result<()> {
     Ok(())
 }
 
+pub fn put_u64_at(data: &mut [u8], offset: usize, value: u64) -> Result<()> {
+    let end = offset.checked_add(8).context("offset overflow")?;
+    data.get_mut(offset..end)
+        .context("write outside buffer")?
+        .copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
 pub fn read_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read {}", path.display()))
 }

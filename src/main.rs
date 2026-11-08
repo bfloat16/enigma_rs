@@ -95,12 +95,13 @@ fn main() -> Result<()> {
                 .into_bytes()
         }
         Mode::Devirt => {
-            let x86 = analysis.devirtualize(rva.unwrap())?;
+            let code = analysis.devirtualize(rva.unwrap())?;
             eprintln!(
-                "x86: {} bytes, image base={:#x}, code RVA={:#x}",
-                x86.bytes().len(),
-                x86.image_base,
-                x86.rva
+                "{}: {} bytes, image base={:#x}, code RVA={:#x}",
+                code.architecture.name(),
+                code.bytes().len(),
+                code.image_base,
+                code.rva
             );
             if args
                 .output
@@ -108,9 +109,9 @@ fn main() -> Result<()> {
                 .and_then(|p| p.extension())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("bin"))
             {
-                x86.bytes().to_vec()
+                code.bytes().to_vec()
             } else {
-                x86.assembly()?.into_bytes()
+                code.assembly()?.into_bytes()
             }
         }
         Mode::Unpack | Mode::Runtime => unreachable!(),

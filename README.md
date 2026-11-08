@@ -39,7 +39,7 @@ cargo build --release --no-default-features --features wgpu
 # 列出已注册的模板 VM 入口 RVA
 ./target/release/enigma-rs.exe "input.exe" --mode scan
 
-# 将指定入口还原为 x86 汇编
+# 将指定入口还原为 x86 / x64 汇编（按输入架构自动选择）
 ./target/release/enigma-rs.exe "input.exe" --mode devirt 0x23b053 -o function.asm
 ```
 
@@ -50,7 +50,7 @@ cargo build --release --no-default-features --features wgpu
 默认自动选择搜索后端，`--mod` 仅用于解包。`devirt` 的 RVA 使用 `scan` 输出的十六进制值；省略 `-o` 则打印汇编，输出扩展名为 `.bin` 则保存机器码。分析输出不覆盖已有文件，生成代码可能仍引用原映像，并非独立可执行文件。
 
 ## 局限
-`scan` / `devirt` 分析模式目前仅支持 x86。
+`devirt` 仅支持部分VM结构。
 
 
 ## 社区

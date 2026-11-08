@@ -6,6 +6,7 @@ mod cuda_build;
 mod gpu;
 mod imports;
 mod pe_config;
+#[path = "devirt/x86/vm.rs"]
 mod static_vm;
 
 fn bytes(text: &str) -> Vec<u8> {

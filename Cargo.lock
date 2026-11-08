@@ -960,6 +960,7 @@ dependencies = [
  "indicatif",
  "lzma-rust2",
  "md5",
+ "rustc-hash 2.1.3",
  "serde_json",
  "sha2 0.10.9",
  "tar",

@@ -13,7 +13,7 @@ impl Budget {
             Ok(value) => value
                 .parse::<u64>()
                 .context("ENIGMA_DEVIRT_TIMEOUT_SECONDS must be an integer")?,
-            Err(std::env::VarError::NotPresent) => 60,
+            Err(std::env::VarError::NotPresent) => 180,
             Err(error) => return Err(error.into()),
         };
         ensure!(
