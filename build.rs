@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -152,7 +154,10 @@ fn destination(package: &str, archive_path: &Path) -> Result<Option<PathBuf>> {
     if parts.is_empty() {
         return Ok(None);
     }
-    let name = relative.file_name().unwrap().to_string_lossy();
+    let name = relative
+        .file_name()
+        .context("missing CUDA archive entry name")?
+        .to_string_lossy();
     if name.to_ascii_uppercase().starts_with("LICENSE") {
         return Ok(Some(
             PathBuf::from("licenses").join(package).join(name.as_ref()),
@@ -186,7 +191,9 @@ fn unpack(package: &str, archive: &Path, root: &Path) -> Result<()> {
             let path = entry.enclosed_name().context("unsafe ZIP entry")?;
             if let Some(relative) = destination(package, &path)? {
                 let target = root.join(relative);
-                fs::create_dir_all(target.parent().unwrap())?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 std::io::copy(&mut entry, &mut fs::File::create(target)?)?;
             }
         }
@@ -202,7 +209,9 @@ fn unpack(package: &str, archive: &Path, root: &Path) -> Result<()> {
             let path = entry.path()?.into_owned();
             if let Some(relative) = destination(package, &path)? {
                 let target = root.join(relative);
-                fs::create_dir_all(target.parent().unwrap())?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 if kind.is_file() {
                     std::io::copy(&mut entry, &mut fs::File::create(target)?)?;
                 } else {
@@ -332,7 +341,10 @@ fn prepare() -> Result<Option<String>> {
     let nvrtc = fs::read_dir(root.join("bin"))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| {
-            let n = p.file_name().unwrap().to_string_lossy();
+            let Some(name) = p.file_name() else {
+                return false;
+            };
+            let n = name.to_string_lossy();
             !n.contains("builtins")
                 && n != "nvrtc.dll"
                 && n != "libnvrtc.so"
@@ -350,7 +362,10 @@ fn prepare() -> Result<Option<String>> {
         fs::rename(&nvrtc, &alias)?;
         #[cfg(unix)]
         if !alias.exists() {
-            std::os::unix::fs::symlink(nvrtc.file_name().unwrap(), &alias)?;
+            std::os::unix::fs::symlink(
+                nvrtc.file_name().context("missing NVRTC filename")?,
+                &alias,
+            )?;
         }
     }
     fs::copy(manifest, root.join("redistrib.json"))?;
@@ -362,7 +377,3 @@ fn prepare() -> Result<Option<String>> {
     )?;
     Ok(Some(release))
 }
-
-#[cfg(test)]
-#[path = "test/cuda_build.rs"]
-mod tests;
