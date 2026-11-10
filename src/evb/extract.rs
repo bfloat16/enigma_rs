@@ -5,60 +5,24 @@ use std::path::PathBuf;
 
 use crate::{
     common::{
-        codec::{self, expanded_size},
-        io::{take, u32_at, u64_at},
+        codec,
+        crypto::Rc4,
+        io::{Cursor, take, u32_at, u64_at},
         pe::Pe,
     },
     unpack::config::Configuration,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct File {
     pub path: PathBuf,
     pub data: Vec<u8>,
 }
 
 fn decipher(data: &[u8], initial: &[u8; 256]) -> Vec<u8> {
-    let mut s = *initial;
-    let (mut i, mut j) = (0u8, 0u8);
-    data.iter()
-        .map(|&byte| {
-            i = i.wrapping_add(1);
-            j = j.wrapping_add(s[i as usize]);
-            s.swap(i as usize, j as usize);
-            byte ^ s[s[i as usize].wrapping_add(s[j as usize]) as usize]
-        })
-        .collect()
-}
-
-struct Cursor<'a> {
-    data: &'a [u8],
-    at: usize,
-}
-impl Cursor<'_> {
-    fn read(&mut self, n: usize) -> Result<&[u8]> {
-        let bytes = take(self.data, self.at, n)?;
-        self.at += n;
-        Ok(bytes)
-    }
-    fn byte(&mut self) -> Result<u8> {
-        Ok(self.read(1)?[0])
-    }
-    fn dword(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.read(4)?.try_into()?))
-    }
-    fn qword(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.read(8)?.try_into()?))
-    }
-    fn name(&mut self) -> Result<String> {
-        let mut words = Vec::new();
-        loop {
-            let word = u16::from_le_bytes(self.read(2)?.try_into()?);
-            if word == 0 {
-                return Ok(String::from_utf16(&words)?);
-            }
-            words.push(word);
-        }
-    }
+    let mut out = data.to_vec();
+    Rc4::from_state(*initial).apply(&mut out);
+    out
 }
 
 struct Node {
@@ -96,7 +60,7 @@ fn path(parent: &std::path::Path, name: &str) -> Result<PathBuf> {
 }
 
 fn directory(tree: &[u8]) -> Result<Vec<Node>> {
-    let mut c = Cursor { data: tree, at: 0 };
+    let mut c = Cursor::new(tree);
     // Iterative traversal avoids a host stack overflow on deep directory trees.
     let mut pending = vec![(PathBuf::new(), 1u32)];
     let mut files = Vec::new();
@@ -112,7 +76,7 @@ fn directory(tree: &[u8]) -> Result<Vec<Node>> {
             children as usize <= tree.len() / 15,
             "invalid EVB child count"
         );
-        let name = c.name()?;
+        let name = c.utf16z()?;
         let kind = c.byte()?;
         let path = path(&parent, &name)?;
         match kind {
@@ -127,12 +91,8 @@ fn directory(tree: &[u8]) -> Result<Vec<Node>> {
                 );
                 c.read(2)?; // File flags and extraction policy.
                 let size = usize::try_from(c.qword()?)?;
-                ensure!(
-                    size <= crate::common::codec::MAX_EXPANDED,
-                    "EVB file exceeds expansion limit"
-                );
                 c.read(29)?; // Dates, attributes, flag.
-                c.name()?; // Optional alternate name.
+                c.utf16z()?; // Optional alternate name.
                 c.byte()?;
                 let offset = usize::try_from(c.qword()?)?;
                 let stored = usize::try_from(c.qword()?)?;
@@ -149,7 +109,7 @@ fn directory(tree: &[u8]) -> Result<Vec<Node>> {
             pending.push((path, children));
         }
     }
-    ensure!(c.at == tree.len(), "unparsed EVB directory bytes");
+    ensure!(c.position() == tree.len(), "unparsed EVB directory bytes");
     Ok(files)
 }
 
@@ -166,10 +126,7 @@ fn interleaved_directory(container: &[u8], state: &[u8; 256]) -> Result<Vec<Node
         at += 4;
         let record = decipher(take(container, at, size)?, state);
         at += size;
-        let mut c = Cursor {
-            data: &record,
-            at: 0,
-        };
+        let mut c = Cursor::new(&record);
         c.dword()?;
         c.dword()?;
         let children = c.dword()?;
@@ -177,7 +134,7 @@ fn interleaved_directory(container: &[u8], state: &[u8; 256]) -> Result<Vec<Node
             children as usize <= container.len() / 15,
             "invalid EVB child count"
         );
-        let label = c.name()?;
+        let label = c.utf16z()?;
         let kind = c.byte()?;
         let item = path(&parent, &label)?;
         match kind {
@@ -189,14 +146,13 @@ fn interleaved_directory(container: &[u8], state: &[u8; 256]) -> Result<Vec<Node
                 );
                 c.read(2)?;
                 let size = usize::try_from(c.qword()?)?;
-                ensure!(
-                    size <= crate::common::codec::MAX_EXPANDED,
-                    "EVB file exceeds expansion limit"
-                );
                 c.read(29)?;
-                c.name()?;
+                c.utf16z()?;
                 let stored = usize::try_from(c.qword()?)?;
-                ensure!(c.at == record.len(), "unparsed interleaved EVB file record");
+                ensure!(
+                    c.position() == record.len(),
+                    "unparsed interleaved EVB file record"
+                );
                 take(container, at, stored)?;
                 files.push(Node {
                     path: item.clone(),
@@ -211,7 +167,6 @@ fn interleaved_directory(container: &[u8], state: &[u8; 256]) -> Result<Vec<Node
         if children != 0 {
             pending.push((item, children));
         }
-        ensure!(files.len() <= 0x100000, "too many EVB files");
     }
     ensure!(
         at == container.len(),
@@ -388,8 +343,8 @@ pub fn extract(pe: &Pe<'_>, config: &Configuration) -> Result<Vec<File>> {
         (nodes, container_data)
     } else {
         let packed = u32_at(&decipher(take(container_data, 120, 4)?, metadata), 0)? as usize;
-        let expected =
-            expanded_size(u32_at(&decipher(take(container_data, 124, 4)?, metadata), 0)? as usize)?;
+        let expected = u32_at(&decipher(take(container_data, 124, 4)?, metadata), 0)? as usize;
+        ensure!(expected > 0, "empty EVB directory");
         let tree = codec::decompress(
             &decipher(take(container_data, 128, packed)?, metadata),
             expected,
@@ -418,5 +373,5 @@ pub fn extract(pe: &Pe<'_>, config: &Configuration) -> Result<Vec<File>> {
 }
 
 #[cfg(test)]
-#[path = "../../test/evb.rs"]
+#[path = "../../tests/evb/extract.rs"]
 mod tests;
