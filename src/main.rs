@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -19,7 +21,7 @@ enum Mode {
     Runtime,
 }
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(version, about = "Static Enigma unpacking and VM analysis")]
 struct Args {
     /// Protected EXE or extracted RVA-mapped runtime DLL.
@@ -77,44 +79,39 @@ impl Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let rva = args.validate()?;
-    if args.mode == Mode::Unpack {
-        return unpack::run(&args.input, args.backend);
-    }
-    if args.mode == Mode::Runtime {
-        return unpack::run_runtime(&args.input, args.output.as_deref());
+    match args.mode {
+        Mode::Unpack => return unpack::run(&args.input, args.backend),
+        Mode::Runtime => return unpack::run_runtime(&args.input, args.output.as_deref()),
+        Mode::Scan | Mode::Devirt => {}
     }
     let bytes = read_file(&args.input)?;
     let analysis = Analysis::parse(&bytes)?;
-    let output = match args.mode {
-        Mode::Scan => {
-            let entries = analysis.entries();
-            entries
-                .iter()
-                .map(|rva| format!("{rva:#010x}\n"))
-                .collect::<String>()
-                .into_bytes()
+    let output = if let Some(rva) = rva {
+        let code = analysis.devirtualize(rva)?;
+        eprintln!(
+            "{}: {} bytes, image base={:#x}, code RVA={:#x}",
+            code.architecture.name(),
+            code.bytes().len(),
+            code.image_base,
+            code.rva
+        );
+        if args
+            .output
+            .as_ref()
+            .and_then(|p| p.extension())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("bin"))
+        {
+            code.bytes().to_vec()
+        } else {
+            code.assembly()?.into_bytes()
         }
-        Mode::Devirt => {
-            let code = analysis.devirtualize(rva.unwrap())?;
-            eprintln!(
-                "{}: {} bytes, image base={:#x}, code RVA={:#x}",
-                code.architecture.name(),
-                code.bytes().len(),
-                code.image_base,
-                code.rva
-            );
-            if args
-                .output
-                .as_ref()
-                .and_then(|p| p.extension())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("bin"))
-            {
-                code.bytes().to_vec()
-            } else {
-                code.assembly()?.into_bytes()
-            }
-        }
-        Mode::Unpack | Mode::Runtime => unreachable!(),
+    } else {
+        analysis
+            .entries()
+            .iter()
+            .map(|rva| format!("{rva:#010x}\n"))
+            .collect::<String>()
+            .into_bytes()
     };
     if let Some(path) = args.output {
         write_new_file(&path, &output)
@@ -127,61 +124,5 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn modes_preserve_unpack_and_parse_hex_rvas() {
-        let unpack = Args::try_parse_from(["enigma-rs", "input.exe", "--mod", "cpu"]).unwrap();
-        assert_eq!(unpack.mode, Mode::Unpack);
-        assert!(unpack.validate().unwrap().is_none());
-        for value in ["0x23B053", "0X23b053", "23b053"] {
-            let args = Args::try_parse_from([
-                "enigma-rs",
-                "input.exe",
-                "--mode",
-                "devirt",
-                value,
-                "-o",
-                "result.asm",
-            ])
-            .unwrap();
-            assert_eq!(args.validate().unwrap(), Some(0x23b053));
-        }
-        let scan = Args::try_parse_from(["enigma-rs", "input.exe", "--mode", "scan"]).unwrap();
-        assert!(scan.validate().unwrap().is_none());
-        let runtime = Args::try_parse_from([
-            "enigma-rs",
-            "input.exe",
-            "--mode",
-            "runtime",
-            "-o",
-            "runtime.dll",
-        ])
-        .unwrap();
-        assert!(runtime.validate().unwrap().is_none());
-    }
-
-    #[test]
-    fn inconsistent_modes_fail_before_opening_input() {
-        for args in [
-            vec!["enigma-rs", "input.exe", "output.exe"],
-            vec!["enigma-rs", "input.exe", "-o", "output.exe"],
-            vec!["enigma-rs", "input.exe", "--mode", "devirt"],
-            vec!["enigma-rs", "input.exe", "--mode", "devirt", "100000000"],
-            vec!["enigma-rs", "input.exe", "--mode", "scan", "--mod", "cpu"],
-            vec!["enigma-rs", "input.exe", "--mode", "scan", "1234"],
-            vec!["enigma-rs", "input.exe", "--mode", "runtime", "1234"],
-            vec![
-                "enigma-rs",
-                "input.exe",
-                "--mode",
-                "runtime",
-                "--mod",
-                "cuda",
-            ],
-        ] {
-            assert!(Args::try_parse_from(args).unwrap().validate().is_err());
-        }
-    }
-}
+#[path = "../tests/main.rs"]
+mod tests;
