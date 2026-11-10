@@ -3,6 +3,7 @@ use anyhow::{Context, Result, ensure};
 use super::config::{Configuration, Descriptor};
 use crate::common::{codec, crypto, pe::Pe};
 
+#[derive(Clone, Debug)]
 pub struct StoredSection {
     pub descriptor: Descriptor,
     pub ciphertext: Vec<u8>,
@@ -95,6 +96,7 @@ pub fn verify_all(sections: &[StoredSection], salt: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recovered {
     pub rva: u32,
     pub bytes: Vec<u8>,
@@ -111,3 +113,7 @@ pub fn recover(sections: &[StoredSection], salt: Option<u32>) -> Result<Vec<Reco
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "../../tests/unpack/extract.rs"]
+mod tests;

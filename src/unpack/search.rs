@@ -21,7 +21,7 @@ pub(crate) fn progress(backend: &'static str, total: u64) -> ProgressBar {
             ProgressStyle::with_template(
                 "{prefix} [{wide_bar:.cyan/blue}] {percent:>3}% {human_pos}/{human_len} {speed} ETA {eta_precise}",
             )
-            .expect("static progress template")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .with_key("speed", |state: &indicatif::ProgressState, out: &mut dyn std::fmt::Write| {
                 let _ = write!(out, "{:.1}M/s", state.per_sec() / 1_000_000.0);
             })

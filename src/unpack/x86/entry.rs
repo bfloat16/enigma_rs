@@ -4,11 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use iced_x86::{FlowControl, Instruction, Mnemonic as M, OpKind, Register as R};
 
 use crate::{
-    common::{
-        codec::{self, expanded_size},
-        io::{take, u32_at},
-        pe::Pe,
-    },
+    common::{codec, io::take, pe::Pe},
     devirt::x86::cpu::{self as x86, Image, State, Value},
 };
 
@@ -68,11 +64,10 @@ fn counted_xor(image: &mut Image, state: &mut State, first: Instruction) -> Resu
         "unsupported entry XOR addressing"
     );
     let count = x86::reg(state, counter)?.require("entry XOR count")?;
-    let length = expanded_size(
-        (count as usize)
-            .checked_mul(width as usize)
-            .context("entry XOR length overflow")?,
-    )?;
+    let length = (count as usize)
+        .checked_mul(width as usize)
+        .context("entry XOR length overflow")?;
+    ensure!(length > 0, "empty entry XOR loop");
     // Restrict updates to a unit counter decrement and a constant pointer
     // stride. No data-dependent update may supply the induction invariant.
     ensure!(
@@ -126,7 +121,7 @@ fn counted_xor(image: &mut Image, state: &mut State, first: Instruction) -> Resu
     last.registers[counter_index] = Value::constant(1);
     last.registers[pointer_index] = Value::constant(
         address
-            .checked_add(length as u32 - width)
+            .checked_add(u32::try_from(length)?.saturating_sub(width))
             .context("entry XOR range overflow")?,
     );
     for i in &body {
@@ -144,42 +139,6 @@ fn counted_xor(image: &mut Image, state: &mut State, first: Instruction) -> Resu
         length,
         key,
     })
-}
-
-fn host_imports(pe: &Pe<'_>, base: u32) -> Result<std::collections::HashMap<u32, String>> {
-    let mut result = std::collections::HashMap::new();
-    let mut descriptor = u32_at(pe.data, pe.optional + 104)?;
-    if descriptor == 0 {
-        return Ok(result);
-    }
-    for _ in 0..1024 {
-        let record = pe.read(descriptor, 20)?;
-        if record == [0; 20] {
-            return Ok(result);
-        }
-        let iat = u32_at(record, 16)?;
-        let lookup = u32_at(record, 0)?;
-        let lookup = if lookup == 0 { iat } else { lookup };
-        for index in 0..65536u32 {
-            let name = u32_at(pe.read(lookup + index * 4, 4)?, 0)?;
-            if name == 0 {
-                break;
-            }
-            if name & 0x80000000 == 0 {
-                let mut bytes = Vec::new();
-                for offset in 0..256 {
-                    let byte = pe.read(name + 2 + offset, 1)?[0];
-                    if byte == 0 {
-                        break;
-                    }
-                    bytes.push(byte);
-                }
-                result.insert(base + iat + index * 4, String::from_utf8(bytes)?);
-            }
-        }
-        descriptor += 20;
-    }
-    bail!("entry import descriptors exceed bounds")
 }
 
 pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
@@ -200,7 +159,7 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
             )?;
         }
     }
-    let imports = host_imports(pe, base).context("entry host import table")?;
+    let imports = pe.imported_names().context("entry host import table")?;
     let mut state = State::new(
         base.checked_add(pe.entry)
             .context("entry address overflow")?,
@@ -209,8 +168,11 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
     let mut loader = None;
     let mut packed = None;
     let mut loader_entry = None;
-    let mut layers = 0;
-    for _ in 0..2_000_000 {
+    let mut layers = 0usize;
+    let mut checkpoint = state.clone();
+    let mut power = 1usize;
+    let mut distance = 0usize;
+    loop {
         if Some(state.pc) == loader_entry {
             let metadata = state
                 .read(&image, state.esp()? + 8, 4)
@@ -260,12 +222,14 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
             }
             if width == 1 {
                 layers += 1;
-                ensure!(layers <= 64, "too many entry XOR layers");
                 image.patch(operation.address, &bytes)?;
             } else {
                 ensure!(packed.is_none(), "multiple Loader ciphertext loops");
                 packed = Some((operation, bytes));
             }
+            checkpoint = state.clone();
+            power = 1;
+            distance = 0;
             continue;
         }
         if i.mnemonic() == M::Call {
@@ -274,7 +238,7 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                 let destination = state.read(&image, esp, 4).get();
                 let packed_length = state.read(&image, esp + 8, 4).get();
                 if state.read(&image, esp + 4, 4).get() == Some(operation.address)
-                    && packed_length.is_some_and(|length| {
+                    && let Some(packed_len) = packed_length.filter(|&length| {
                         length as usize >= operation.length
                             && (length as usize) < operation.length + 4
                     })
@@ -291,18 +255,15 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                         "Loader destination is not a section base"
                     );
                     let mut stream = bytes.clone();
-                    let tail = packed_length.unwrap() as usize - stream.len();
+                    let tail = packed_len as usize - stream.len();
                     if tail != 0 {
                         stream.extend(
                             pe.read(operation.address - base + operation.length as u32, tail)?,
                         );
                     }
-                    let mut decoded = codec::decompress(
-                        &stream,
-                        expanded_size(section.virtual_size as usize)?,
-                        false,
-                    )
-                    .context("Loader decompression failed")?;
+                    let mut decoded =
+                        codec::decompress(&stream, section.virtual_size as usize, false)
+                            .context("Loader decompression failed")?;
                     codec::fix_branches(&mut decoded);
                     let parsed = Pe::parse(&decoded).context("decoded Loader PE")?;
                     loader_entry = Some(
@@ -317,13 +278,16 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                     state.registers[0] = Value::UNKNOWN;
                     state.flags = Value::unknown_flags();
                     state.pc = i.next_ip32();
+                    checkpoint = state.clone();
+                    power = 1;
+                    distance = 0;
                     continue;
                 }
             }
             if i.op_kind(0) == OpKind::Memory {
                 let slot = x86::address(&state, &i)?.require("entry API slot")?;
                 let name = imports
-                    .get(&slot)
+                    .get(&u64::from(slot))
                     .context("entry calls an unknown API slot")?;
                 let consumed = match name.as_str() {
                     "LoadLibraryA" | "GetModuleHandleA" => 4,
@@ -336,20 +300,37 @@ pub(crate) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                 state.registers[4] = Value::constant(state.esp()? + consumed);
                 state.flags = Value::unknown_flags();
                 state.pc = i.next_ip32();
+                if state == checkpoint {
+                    bail!("entry decoding cycle at {:#x}", state.pc);
+                }
+                distance += 1;
+                if distance == power {
+                    checkpoint = state.clone();
+                    power = power.saturating_mul(2);
+                    distance = 0;
+                }
                 continue;
             }
         }
         if i.mnemonic() == M::Push && i.memory_segment() == R::FS {
             state.push(&image, Value::UNKNOWN)?;
             state.pc = i.next_ip32();
-            continue;
+        } else {
+            ensure!(
+                x86::execute(&mut state, &image, &i)
+                    .with_context(|| format!("entry {:#x} {:?}", i.ip(), i.mnemonic()))?
+                    .is_none(),
+                "entry decoding depends on an unknown branch"
+            );
         }
-        ensure!(
-            x86::execute(&mut state, &image, &i)
-                .with_context(|| format!("entry {:#x} {:?}", i.ip(), i.mnemonic()))?
-                .is_none(),
-            "entry decoding depends on an unknown branch"
-        );
+        if state == checkpoint {
+            bail!("entry decoding cycle at {:#x}", state.pc);
+        }
+        distance += 1;
+        if distance == power {
+            checkpoint = state.clone();
+            power = power.saturating_mul(2);
+            distance = 0;
+        }
     }
-    bail!("entry instruction bound exceeded")
 }

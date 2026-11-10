@@ -22,6 +22,17 @@ pub struct GpuProbe<R: Runtime> {
     compressed: u32,
 }
 
+impl<R: Runtime> std::fmt::Debug for GpuProbe<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuProbe")
+            .field("length", &self.length)
+            .field("expected", &self.expected)
+            .field("crc", &self.crc)
+            .field("compressed", &self.compressed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Runtime> GpuProbe<R> {
     pub(crate) fn new(section: &StoredSection, client: ComputeClient<R>) -> Result<Self> {
         ensure!(!section.ciphertext.is_empty(), "empty GPU probe");
@@ -30,8 +41,10 @@ impl<R: Runtime> GpuProbe<R> {
                 && section.ciphertext.len() == section.descriptor.packed_size,
             "GPU probe requires an RC4 section with matching stored length"
         );
-        crate::common::codec::expanded_size(section.ciphertext.len())?;
-        crate::common::codec::expanded_size(section.descriptor.expanded_size)?;
+        ensure!(
+            section.descriptor.expanded_size > 0,
+            "empty expanded section"
+        );
         let cipher: Vec<u32> = section.ciphertext.iter().map(|&b| b as u32).collect();
         let seed = section.descriptor.seed;
         let mut initial: Vec<u32> = (0..256).collect();
@@ -81,6 +94,8 @@ impl<R: Runtime> GpuProbe<R> {
         let hit_count = self.client.create_from_slice(u32::as_bytes(&[0]));
         // Each hit reserves one slot. At most `count` lanes can hit, so the
         // candidate buffer cannot overflow, including a hit for every lane.
+        // SAFETY: All device buffer handles were allocated with at least the lengths passed
+        // to `ArrayArg::from_raw_parts`, and `count <= BATCH`.
         unsafe {
             enumerate::launch_unchecked::<R>(
                 &self.client,
@@ -221,10 +236,9 @@ fn plausible(data: &Array<u32>, length: u32, packed: u32, expected: u32) -> bool
                     distance = previous;
                     count = input.gamma(data, length);
                 } else {
-                    // Output objects are bounded to 256 MiB on the host. Codes
-                    // beyond this bound cannot be a valid backwards distance.
-                    // Still consume the prefix: exhaustion is inconclusive.
-                    if d > 0x100001 {
+                    // Codes beyond the expected output size cannot be a valid
+                    // backwards distance. Still consume the prefix: exhaustion is inconclusive.
+                    if d - 1 > (expected >> 8) {
                         valid = false;
                     }
                     distance = ((d - 1) << 8) | input.byte(data, length);
@@ -488,3 +502,7 @@ pub(crate) fn enumerate(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unpack/gpu_kernel.rs"]
+mod tests;

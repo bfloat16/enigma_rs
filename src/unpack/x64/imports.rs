@@ -29,7 +29,8 @@ pub(super) fn recover(
     let data = u32_at(ctx, layout.data)?;
     let fields = layout.data + 0x4c;
     let packed = u32_at(ctx, fields + 4)? as usize;
-    let expanded = codec::expanded_size(u32_at(ctx, fields + 8)? as usize)?;
+    let expanded = u32_at(ctx, fields + 8)? as usize;
+    ensure!(packed > 0 && expanded > 0, "empty x64 import stream");
     let raw = codec::decompress(
         &Idea::new(&[0; 16]).decrypt(
             pe.read(
@@ -61,8 +62,7 @@ pub(super) fn recover(
     let engine = imports::engine_section(pe, image)?;
     let slots: BTreeSet<_> = symbols.iter().map(|s| s.iat_rva).collect();
     let min = *slots.first().context("no x64 imports")?;
-    let max = *slots.last().unwrap();
-    ensure!(max - min <= 0x100000, "oversized x64 IAT");
+    let max = *slots.last().context("no x64 imports")?;
     for slot in (min..=max).step_by(8) {
         let value = u64_at(imports::recovered_read(recovered, slot, 8)?, 0)?;
         if slots.contains(&slot) || value == 0 {

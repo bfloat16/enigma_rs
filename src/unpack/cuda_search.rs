@@ -52,10 +52,12 @@ pub fn runtime_relaunch() -> Result<Option<ExitStatus>> {
 
 pub fn probe(section: &StoredSection) -> Result<GpuProbe> {
     // Probe optional libraries before CubeCL's lazy loader can panic.
+    // SAFETY: `is_culib_present` only checks whether the dynamic library can be loaded.
     ensure!(
         unsafe { cudarc::driver::sys::is_culib_present() },
         "CUDA driver library is unavailable"
     );
+    // SAFETY: `is_culib_present` only checks whether the NVRTC library can be loaded.
     ensure!(
         unsafe { cudarc::nvrtc::sys::is_culib_present() },
         "CUDA NVRTC library is unavailable; install CUDA Toolkit and add its libraries to the system search path"

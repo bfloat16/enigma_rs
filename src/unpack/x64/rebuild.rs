@@ -116,8 +116,8 @@ pub(in crate::unpack) fn rebuild(
                 .as_chunks::<12>()
                 .0
                 .iter()
-                .any(|r| u32_at(r, 0).unwrap() <= patch.rva
-                    && patch.rva + patch.bytes.len() as u32 <= u32_at(r, 4).unwrap()),
+                .any(|r| u32_at(r, 0).is_ok_and(|s| s <= patch.rva)
+                    && u32_at(r, 4).is_ok_and(|e| patch.rva + patch.bytes.len() as u32 <= e)),
             "native x64 entry exceeds its unwind function extent"
         );
     }
@@ -176,11 +176,6 @@ pub(in crate::unpack) fn rebuild(
                 .checked_sub(start)
                 .context("x64 TLS template range")?,
         )?;
-        ensure!(
-            length <= codec::MAX_EXPANDED
-                && u32_at(raw, 32)? as usize <= codec::MAX_EXPANDED - length,
-            "oversized x64 TLS template"
-        );
         let template = tls_template(pe, if length == 0 { 0 } else { to_rva(start)? }, length)?;
         let mut callbacks = Vec::new();
         let callbacks_va = u64_at(raw, 24)?;
@@ -196,8 +191,9 @@ pub(in crate::unpack) fn rebuild(
                     "x64 TLS callback remains in runtime"
                 );
                 callbacks.push(value);
-                ensure!(callbacks.len() <= 1024, "too many TLS callbacks");
-                rva += 8;
+                rva = rva
+                    .checked_add(8)
+                    .context("x64 TLS callback RVA overflow")?;
             }
         }
         payload.resize(align(payload.len(), 8)?, 0);
@@ -235,11 +231,9 @@ pub(in crate::unpack) fn rebuild(
         let rva = u32_at(ctx, layout.data)?
             .checked_add(u32_at(ctx, layout.relocations)?)
             .context("x64 relocation source overflow")?;
-        relocs = codec::decompress(
-            pe.read(rva, relocation_size)?,
-            codec::expanded_size(u32_at(ctx, layout.relocations + 8)? as usize)?,
-            true,
-        )?;
+        let expanded_relocs = u32_at(ctx, layout.relocations + 8)? as usize;
+        ensure!(expanded_relocs > 0, "empty x64 relocation stream");
+        relocs = codec::decompress(pe.read(rva, relocation_size)?, expanded_relocs, true)?;
         let mut at = 0;
         while at < relocs.len() {
             let page = u32_at(&relocs, at)?;
@@ -321,11 +315,10 @@ pub(in crate::unpack) fn rebuild(
         put(&mut output, at + 36, flags)?;
         let offset = align(output.len(), pe.file_alignment as usize)?;
         let raw = align(bytes.len(), pe.file_alignment as usize)?;
-        ensure!(
-            offset + raw <= codec::MAX_EXPANDED,
-            "rebuilt x64 image too large"
-        );
-        output.resize(offset + raw, 0);
+        let end = offset
+            .checked_add(raw)
+            .context("rebuilt x64 image size overflow")?;
+        output.resize(end, 0);
         output[offset..offset + bytes.len()].copy_from_slice(&bytes);
         put(
             &mut output,
@@ -388,6 +381,8 @@ pub(in crate::unpack) fn rebuild(
         "missing x64 data directories"
     );
     output[directory..directory + n * 8].fill(0);
+    let min_patch = *patches.first_key_value().context("no x64 IAT patches")?.0;
+    let max_patch = *patches.last_key_value().context("no x64 IAT patches")?.0;
     for (index, rva, size) in [
         (1, section_rva, descriptors_size as u32),
         (
@@ -402,11 +397,7 @@ pub(in crate::unpack) fn rebuild(
             relocs.len() as u32,
         ),
         (9, tls_rva, if tls_rva == 0 { 0 } else { 40 }),
-        (
-            12,
-            *patches.first_key_value().unwrap().0,
-            *patches.last_key_value().unwrap().0 - *patches.first_key_value().unwrap().0 + 8,
-        ),
+        (12, min_patch, max_patch - min_patch + 8),
     ] {
         put(&mut output, directory + index * 8, rva)?;
         put(&mut output, directory + index * 8 + 4, size)?;

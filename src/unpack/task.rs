@@ -10,6 +10,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 
+#[derive(Clone, Debug)]
 pub struct Unpacked {
     pub executable: Vec<u8>,
     pub files: Vec<evb::File>,

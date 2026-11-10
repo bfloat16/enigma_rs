@@ -2,7 +2,7 @@
 use super::extract::Recovered;
 use crate::common::{
     idea::Idea,
-    io::{take, u32_at},
+    io::{Cursor, take, u32_at},
     pe::Pe,
 };
 use anyhow::{Context, Result, ensure};
@@ -15,35 +15,16 @@ pub struct Import {
     pub ordinal: Option<u16>,
     pub iat_rva: u32,
 }
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-impl<'a> Cursor<'a> {
-    fn read(&mut self, n: usize) -> Result<&'a [u8]> {
-        let bytes = take(self.bytes, self.at, n)?;
-        self.at += n;
-        Ok(bytes)
-    }
-    fn byte(&mut self) -> Result<u8> {
-        Ok(self.read(1)?[0])
-    }
-    fn word(&mut self) -> Result<u16> {
-        Ok(u16::from_le_bytes(self.read(2)?.try_into()?))
-    }
-    fn dword(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.read(4)?.try_into()?))
-    }
-    fn name(&mut self, idea: &Idea) -> Result<String> {
-        let n = self.word()? as usize;
-        ensure!((1..0x8000).contains(&n), "invalid import name length");
-        let plain = idea.decrypt(self.read(n)?);
-        ensure!(
-            plain.iter().all(|b| (32..127).contains(b)),
-            "invalid decrypted import name"
-        );
-        Ok(String::from_utf8(plain)?)
-    }
+
+fn decrypt_name(c: &mut Cursor<'_>, idea: &Idea) -> Result<String> {
+    let n = c.word()? as usize;
+    ensure!(n > 0, "empty import name");
+    let plain = idea.decrypt(c.read(n)?);
+    ensure!(
+        plain.iter().all(|b| (32..127).contains(b)),
+        "invalid decrypted import name"
+    );
+    Ok(String::from_utf8(plain)?)
 }
 
 pub fn parse_records(
@@ -52,11 +33,21 @@ pub fn parse_records(
     flag_size: usize,
     is_64: bool,
 ) -> Result<Vec<Import>> {
+    parse_records_with(plain, key, flag_size, is_64, |references| {
+        Ok(references.to_vec())
+    })
+}
+
+/// Resolve architecture-specific references before validating unique IAT slots.
+pub(super) fn parse_records_with(
+    plain: &[u8],
+    key: &[u8; 16],
+    flag_size: usize,
+    is_64: bool,
+    mut resolve: impl FnMut(&[u32]) -> Result<Vec<u32>>,
+) -> Result<Vec<Import>> {
     let idea = Idea::new(key);
-    let mut c = Cursor {
-        bytes: plain,
-        at: 0,
-    };
+    let mut c = Cursor::new(plain);
     let mut dll = None;
     let mut symbols = Vec::new();
     let mut slots = BTreeSet::new();
@@ -70,15 +61,15 @@ pub fn parse_records(
             break;
         }
         if flags & 1 != 0 {
-            dll = Some(c.name(&idea)?);
+            dll = Some(decrypt_name(&mut c, &idea)?);
             continue;
         }
         let dll = dll.as_ref().context("API record precedes its DLL")?.clone();
         let (name, ordinal) = if flags & 4 != 0 {
-            (Some(c.name(&idea)?), None)
+            (Some(decrypt_name(&mut c, &idea)?), None)
         } else {
             let n = if is_64 {
-                let value = u64::from_le_bytes(c.read(8)?.try_into()?);
+                let value = c.qword()?;
                 ensure!(
                     value & 0x7fff_ffff_ffff_0000 == 0,
                     "invalid x64 import ordinal"
@@ -92,6 +83,7 @@ pub fn parse_records(
         };
         let references = c.word()?;
         ensure!(references > 0, "API record has no references");
+        let mut rvas = Vec::with_capacity(references as usize);
         for _ in 0..references {
             let first = c.dword()?;
             let iat_rva = c.dword()?;
@@ -99,11 +91,16 @@ pub fn parse_records(
                 first == 0,
                 "unsupported first import reference field {first:#x}"
             );
+            rvas.push(iat_rva);
+        }
+        let resolved = resolve(&rvas)?;
+        ensure!(!resolved.is_empty(), "API record has no IAT slots");
+        for iat_rva in resolved {
             ensure!(
                 iat_rva > 0
                     && iat_rva.is_multiple_of(if is_64 { 8 } else { 4 })
                     && slots.insert(iat_rva),
-                "invalid or duplicate IAT slot"
+                "invalid or duplicate IAT slot {iat_rva:#x}"
             );
             symbols.push(Import {
                 dll: dll.clone(),
@@ -112,10 +109,9 @@ pub fn parse_records(
                 iat_rva,
             });
         }
-        ensure!(symbols.len() <= 65536, "too many import slots");
     }
     ensure!(
-        c.at == plain.len() && !symbols.is_empty(),
+        c.position() == plain.len() && !symbols.is_empty(),
         "incomplete import record consumption"
     );
     Ok(symbols)
@@ -128,6 +124,7 @@ pub fn recovered_read(recovered: &[Recovered], rva: u32, size: usize) -> Result<
         .context("RVA outside recovered sections")?;
     take(&section.bytes, (rva - section.rva) as usize, size)
 }
+
 pub fn engine_section<'a>(pe: &'a Pe<'_>, image: &[u8]) -> Result<&'a crate::common::pe::Section> {
     let size = u32_at(image, u32_at(image, 0x3c)? as usize + 80)?;
     let candidates: Vec<_> = pe
@@ -141,3 +138,7 @@ pub fn engine_section<'a>(pe: &'a Pe<'_>, image: &[u8]) -> Result<&'a crate::com
     );
     Ok(candidates[0])
 }
+
+#[cfg(test)]
+#[path = "../../tests/unpack/imports.rs"]
+mod tests;

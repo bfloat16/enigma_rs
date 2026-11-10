@@ -55,11 +55,8 @@ fn relocations(
     let rva = u32_at(ctx, layout.data)?
         .checked_add(u32_at(ctx, layout.relocations)?)
         .context("relocation RVA overflow")?;
-    let bytes = codec::decompress(
-        pe.read(rva, crate::common::codec::expanded_size(packed)?)?,
-        crate::common::codec::expanded_size(expanded)?,
-        true,
-    )?;
+    ensure!(packed > 0 && expanded > 0, "incomplete relocation sizes");
+    let bytes = codec::decompress(pe.read(rva, packed)?, expanded, true)?;
     let mut p = 0;
     let mut count = 0;
     while p < bytes.len() {
@@ -150,10 +147,6 @@ fn append_tls(
         .checked_sub(start)
         .context("invalid TLS template range")? as usize;
     let zero_fill = u32_at(tls, 16)?;
-    ensure!(
-        length as u64 + zero_fill as u64 <= crate::common::codec::MAX_EXPANDED as u64,
-        "TLS template too large"
-    );
     let template = tls_template(pe, if length == 0 { 0 } else { to_rva(start)? }, length)?;
     let characteristics = u32_at(tls, 20)?;
     let mut callbacks = Vec::new();
@@ -367,13 +360,11 @@ pub fn rebuild(pe: &Pe<'_>, config: &Configuration, recovered: &[Recovered]) -> 
         put(&mut output, at + 36, characteristics)?;
         let offset = align(output.len(), pe.file_alignment as usize)?;
         let raw = align(bytes.len(), pe.file_alignment as usize)?;
-        ensure!(
-            offset
-                .checked_add(raw)
-                .is_some_and(|e| e <= crate::common::codec::MAX_EXPANDED),
-            "rebuilt PE too large"
-        );
-        output.resize(offset + raw, 0);
+        let end = offset
+            .checked_add(raw)
+            .context("rebuilt PE size overflow")?;
+        u32::try_from(end)?;
+        output.resize(end, 0);
         output[offset..offset + bytes.len()].copy_from_slice(&bytes);
         let virtual_size = section.virtual_size.max(u32::try_from(bytes.len())?);
         put(&mut output, at + 8, virtual_size)?;
@@ -393,10 +384,10 @@ pub fn rebuild(pe: &Pe<'_>, config: &Configuration, recovered: &[Recovered]) -> 
     }
     let offset = align(output.len(), pe.file_alignment as usize)?;
     let raw = align(payload.len(), pe.file_alignment as usize)?;
-    ensure!(
-        offset + raw <= crate::common::codec::MAX_EXPANDED,
-        "rebuilt PE too large"
-    );
+    let end = offset
+        .checked_add(raw)
+        .context("rebuilt PE size overflow")?;
+    u32::try_from(end)?;
     let at = table + host.len() * 40;
     output[at..at + 8].copy_from_slice(b".rebuild");
     put(&mut output, at + 8, payload.len() as u32)?;
@@ -408,7 +399,7 @@ pub fn rebuild(pe: &Pe<'_>, config: &Configuration, recovered: &[Recovered]) -> 
         at + 36,
         if native_entry { 0x60000060 } else { 0xc0000040 },
     )?;
-    output.resize(offset + raw, 0);
+    output.resize(end, 0);
     output[offset..offset + payload.len()].copy_from_slice(&payload);
     output[pe.nt + 6..pe.nt + 8].copy_from_slice(&(count as u16).to_le_bytes());
     let characteristics = u16_at(pe.data, pe.nt + 22)?;
@@ -486,5 +477,5 @@ pub fn rebuild(pe: &Pe<'_>, config: &Configuration, recovered: &[Recovered]) -> 
 }
 
 #[cfg(test)]
-#[path = "../../../test/unpack/x86/rebuild.rs"]
+#[path = "../../../tests/unpack/x86/rebuild.rs"]
 mod tests;

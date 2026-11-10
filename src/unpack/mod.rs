@@ -12,8 +12,10 @@ mod x64;
 mod x86;
 
 #[cfg(all(feature = "cuda", cuda_available))]
+#[allow(unsafe_code)]
 pub mod cuda_search;
 #[cfg(any(all(feature = "cuda", cuda_available), feature = "wgpu"))]
+#[allow(unsafe_code)]
 pub mod gpu_kernel;
 #[cfg(feature = "wgpu")]
 pub mod wgpu_search;

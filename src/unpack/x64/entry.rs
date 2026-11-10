@@ -1,11 +1,7 @@
 //! Reached x64 bootstrap instructions; counted XOR and LZ calls are summarized.
 use super::super::entry::Entry;
 use crate::{
-    common::{
-        codec,
-        io::{take, u32_at, u64_at},
-        pe::Pe,
-    },
+    common::{codec, io::take, pe::Pe},
     devirt::x64::cpu::{self as cpu, Image, State, Value},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -23,45 +19,15 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
             )?;
         }
     }
-    let mut imports = std::collections::HashMap::new();
-    let mut desc = u32_at(pe.data, pe.optional + 120)?;
-    if desc != 0 {
-        for _ in 0..1024 {
-            let d = pe.read(desc, 20)?;
-            if d == [0; 20] {
-                break;
-            }
-            let iat = u32_at(d, 16)?;
-            let lookup = u32_at(d, 0)?;
-            let lookup = if lookup == 0 { iat } else { lookup };
-            for index in 0..65536 {
-                let v = u64_at(pe.read(lookup + index * 8, 8)?, 0)?;
-                if v == 0 {
-                    break;
-                }
-                if v >> 63 == 0 {
-                    let mut name = Vec::new();
-                    for n in 0..256 {
-                        let b = pe.read(u32::try_from(v)? + 2 + n, 1)?[0];
-                        if b == 0 {
-                            break;
-                        }
-                        name.push(b);
-                    }
-                    imports.insert(
-                        base + iat as u64 + index as u64 * 8,
-                        String::from_utf8(name)?,
-                    );
-                }
-            }
-            desc = desc.checked_add(20).context("x64 import RVA overflow")?;
-        }
-    }
+    let imports = pe.imported_names().context("x64 bootstrap import table")?;
     let mut state = State::new(base + pe.entry as u64, 0x200100000);
     let mut loader = None;
     let mut loader_entry = None;
     let mut packed: Option<(u64, Vec<u8>)> = None;
-    for _ in 0..2_000_000 {
+    let mut checkpoint = state.clone();
+    let mut power = 1usize;
+    let mut distance = 0usize;
+    loop {
         if Some(state.pc) == loader_entry {
             return Ok(Entry {
                 loader,
@@ -81,9 +47,7 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
         }
         if i.mnemonic() == M::Stmxcsr {
             state.pc = i.next_ip();
-            continue;
-        }
-        if i.mnemonic() == M::Xor && i.op0_kind() == OpKind::Memory {
+        } else if i.mnemonic() == M::Xor && i.op0_kind() == OpKind::Memory {
             let address = cpu::address(&state, &i)?.require("x64 XOR address")?;
             let width = i.memory_size().size();
             ensure!(matches!(width, 1 | 4), "unsupported x64 XOR width");
@@ -111,11 +75,12 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                 "unsupported x64 counted XOR loop"
             );
             let count = cpu::reg(&state, counter)?.require("x64 XOR count")?;
-            let length = codec::expanded_size(usize::try_from(
+            let length = usize::try_from(
                 count
                     .checked_mul(width as u64)
                     .context("x64 XOR size overflow")?,
-            )?)?;
+            )?;
+            ensure!(length > 0, "empty x64 XOR loop");
             let mut bytes = Vec::with_capacity(length);
             for n in 0..length {
                 bytes.push(
@@ -138,15 +103,17 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                 ensure!(packed.is_none(), "multiple x64 packed runtimes");
                 packed = Some((address, bytes));
             }
+            checkpoint = state.clone();
+            power = 1;
+            distance = 0;
             continue;
-        }
-        if i.mnemonic() == M::Call {
+        } else if i.mnemonic() == M::Call {
             if let Some((source, bytes)) = &packed
                 && loader.is_none()
                 && cpu::reg(&state, R::RCX)?.get() == Some(*source)
-                && cpu::reg(&state, R::RAX)?
+                && let Some(length) = cpu::reg(&state, R::RAX)?
                     .get()
-                    .is_some_and(|n| n >= bytes.len() as u64 && n < bytes.len() as u64 + 4)
+                    .filter(|&n| n >= bytes.len() as u64 && n < bytes.len() as u64 + 4)
             {
                 let dest = cpu::reg(&state, R::RDX)?.require("x64 runtime destination")?;
                 let rva = u32::try_from(dest.checked_sub(base).context("runtime below host")?)?;
@@ -158,7 +125,7 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                     "runtime destination is not section start"
                 );
                 let mut stream = bytes.clone();
-                let length = cpu::reg(&state, R::RAX)?.get().unwrap() as usize;
+                let length = usize::try_from(length)?;
                 stream.extend(pe.read(
                     u32::try_from(source - base)? + bytes.len() as u32,
                     length - bytes.len(),
@@ -171,6 +138,9 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                 image.replace_region(dest, decoded.clone())?;
                 loader = Some(decoded);
                 state.pc = i.next_ip();
+                checkpoint = state.clone();
+                power = 1;
+                distance = 0;
                 continue;
             }
             if i.op0_kind() == OpKind::Memory {
@@ -186,15 +156,32 @@ pub(in crate::unpack) fn parse(pe: &Pe<'_>) -> Result<Entry> {
                 state.registers[0] = Value::constant(0x700000000);
                 state.flags = Value::unknown_flags();
                 state.pc = i.next_ip();
-                continue;
+            } else {
+                ensure!(
+                    cpu::execute(&mut state, &image, &i)
+                        .with_context(|| {
+                            format!("x64 bootstrap at {:#x} {:?}", i.ip(), i.mnemonic())
+                        })?
+                        .is_none(),
+                    "x64 bootstrap depends on unknown input"
+                );
             }
+        } else {
+            ensure!(
+                cpu::execute(&mut state, &image, &i)
+                    .with_context(|| format!("x64 bootstrap at {:#x} {:?}", i.ip(), i.mnemonic()))?
+                    .is_none(),
+                "x64 bootstrap depends on unknown input"
+            );
         }
-        ensure!(
-            cpu::execute(&mut state, &image, &i)
-                .with_context(|| format!("x64 bootstrap at {:#x} {:?}", i.ip(), i.mnemonic()))?
-                .is_none(),
-            "x64 bootstrap depends on unknown input"
-        );
+        if state == checkpoint {
+            bail!("x64 bootstrap cycle at {:#x}", state.pc);
+        }
+        distance += 1;
+        if distance == power {
+            checkpoint = state.clone();
+            power = power.saturating_mul(2);
+            distance = 0;
+        }
     }
-    bail!("x64 bootstrap instruction limit")
 }

@@ -24,10 +24,6 @@ pub(super) fn align(value: usize, alignment: usize) -> Result<usize> {
 /// Windows copies TLS initializers from the mapped image, including BSS and
 /// zero-filled section tails. Other PE readers must still require file data.
 pub(super) fn tls_template<'a>(pe: &Pe<'a>, rva: u32, size: usize) -> Result<Cow<'a, [u8]>> {
-    ensure!(
-        size <= crate::common::codec::MAX_EXPANDED,
-        "TLS template too large"
-    );
     if size == 0 {
         return Ok(Cow::Borrowed(&[]));
     }
@@ -130,5 +126,5 @@ pub(super) fn import_table(symbols: &[Import], section: u32, is_64: bool) -> Res
 }
 
 #[cfg(test)]
-#[path = "../../test/unpack/rebuild.rs"]
+#[path = "../../tests/unpack/rebuild.rs"]
 mod tests;

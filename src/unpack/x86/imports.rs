@@ -2,7 +2,7 @@
 use super::super::{
     config::Configuration,
     extract::Recovered,
-    imports::{Import, engine_section, parse_records, recovered_read},
+    imports::{Import, engine_section, parse_records_with, recovered_read},
 };
 use crate::{
     common::{
@@ -15,6 +15,64 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
+
+fn resolve_references(
+    pe: &Pe<'_>,
+    recovered: &[Recovered],
+    references: &[u32],
+) -> Result<Vec<u32>> {
+    if references.first() != Some(&0) {
+        return Ok(references.to_vec());
+    }
+    // A missing serialized IAT slot is followed by code operand RVAs. The
+    // recovered FF /2, FF /4, MOV r32,[abs] and MOV EAX,moffs32 operands still
+    // contain the original IAT VAs, even when multiple uses share one slot.
+    ensure!(references.len() > 1, "missing import operand references");
+    let mut operands = BTreeSet::new();
+    let mut slots = BTreeSet::new();
+    for &rva in &references[1..] {
+        ensure!(
+            rva > 0 && operands.insert(rva),
+            "invalid or duplicate import operand RVA {rva:#x}"
+        );
+        let operand = recovered_read(recovered, rva - 1, 5)?;
+        let start = if operand[0] == 0xa1 {
+            rva - 1
+        } else {
+            let start = rva
+                .checked_sub(2)
+                .context("import instruction RVA underflow")?;
+            let opcode = recovered_read(recovered, start, 2)?;
+            ensure!(
+                matches!(opcode, [0xff, 0x15 | 0x25])
+                    || (opcode[0] == 0x8b && opcode[1] & 0xc7 == 0x05),
+                "unsupported import operand at RVA {rva:#x}"
+            );
+            start
+        };
+        let section = pe
+            .section_at(start)
+            .context("import operand outside host sections")?;
+        ensure!(
+            section.characteristics & 0x20000000 != 0,
+            "import operand outside executable code"
+        );
+        recovered_read(recovered, start, (rva - start) as usize + 4)?;
+        let slot = u32::try_from(
+            u64::from(u32_at(operand, 1)?)
+                .checked_sub(pe.image_base)
+                .context("import operand points below image base")?,
+        )?;
+        ensure!(
+            slot > 0 && slot.is_multiple_of(4),
+            "invalid indirect IAT slot {slot:#x}"
+        );
+        recovered_read(recovered, slot, 4)
+            .context("indirect IAT slot outside recovered sections")?;
+        slots.insert(slot);
+    }
+    Ok(slots.into_iter().collect())
+}
 
 pub(super) fn recover(
     pe: &Pe<'_>,
@@ -33,10 +91,9 @@ pub(super) fn recover(
     let metadata_rva = u32_at(ctx, layout.data)?
         .checked_add(u32_at(ctx, fields.descriptor)?)
         .context("import RVA overflow")?;
-    let packed_size =
-        crate::common::codec::expanded_size(u32_at(ctx, fields.descriptor + 4)? as usize)?;
-    let expanded =
-        crate::common::codec::expanded_size(u32_at(ctx, fields.descriptor + 8)? as usize)?;
+    let packed_size = u32_at(ctx, fields.descriptor + 4)? as usize;
+    let expanded = u32_at(ctx, fields.descriptor + 8)? as usize;
+    ensure!(packed_size > 0 && expanded > 0, "empty import stream");
     let key: [u8; 16] = take(ctx, fields.name_key, 16)?.try_into()?;
     ensure!(ctx[fields.name_key - 1] >= 16, "short import name key");
     // The constructor clears ctx+4. A registration-check branch XORs its
@@ -56,7 +113,9 @@ pub(super) fn recover(
         let result = (|| -> Result<Vec<Import>> {
             let packed = Idea::new(&buffer_key).decrypt(cipher);
             let plain = codec::decompress(&packed, expanded, true)?;
-            parse_records(&plain, &key, fields.flag_size, false)
+            parse_records_with(&plain, &key, fields.flag_size, false, |references| {
+                resolve_references(pe, recovered, references)
+            })
         })();
         match result {
             Ok(symbols) => {
@@ -76,7 +135,6 @@ pub(super) fn recover(
     let slots: BTreeSet<_> = symbols.iter().map(|s| s.iat_rva).collect();
     let min = *slots.first().context("no IAT slots")?;
     let max = *slots.last().context("no IAT slots")?;
-    ensure!(max - min <= 0x100000, "oversized IAT range");
     let mut zeros = BTreeSet::new();
     for slot in (min..=max).step_by(4) {
         let value = u32_at(recovered_read(recovered, slot, 4)?, 0)?;
@@ -121,3 +179,7 @@ pub(super) fn recover(
     );
     Ok(symbols)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unpack/x86/imports.rs"]
+mod tests;

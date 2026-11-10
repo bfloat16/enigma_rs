@@ -3,8 +3,7 @@ use anyhow::{Context, Result, ensure};
 use super::entry::Entry;
 use crate::{
     common::{
-        codec::{self, expanded_size},
-        crypto,
+        codec, crypto,
         io::{take, u32_at},
         pe::Pe,
     },
@@ -31,7 +30,8 @@ pub struct Layout {
     pub machine_suffix: usize,
     pub trampoline: u32,
 }
-#[derive(Clone, Debug)]
+
+#[derive(Clone)]
 pub struct Descriptor {
     pub index: usize,
     pub enabled: bool,
@@ -46,6 +46,21 @@ pub struct Descriptor {
     pub crc32: u32,
 }
 
+impl std::fmt::Debug for Descriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Descriptor")
+            .field("index", &self.index)
+            .field("enabled", &self.enabled)
+            .field("flags", &self.flags)
+            .field("packed_size", &self.packed_size)
+            .field("expanded_size", &self.expanded_size)
+            .field("rva", &self.rva)
+            .field("characteristics", &self.characteristics)
+            .field("crc32", &self.crc32)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Configuration {
     pub descriptors: Vec<Descriptor>,
     /// Original packed-section bytes displaced by the protector's entry jump.
@@ -53,6 +68,18 @@ pub struct Configuration {
     pub ctx: Option<Vec<u8>>,
     pub loader: Option<Vec<u8>>,
     pub layout: Option<Layout>,
+}
+
+impl std::fmt::Debug for Configuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Configuration")
+            .field("descriptors", &self.descriptors)
+            .field("entry_patch", &self.entry_patch)
+            .field("ctx_len", &self.ctx.as_ref().map(Vec::len))
+            .field("loader_len", &self.loader.as_ref().map(Vec::len))
+            .field("layout", &self.layout)
+            .finish()
+    }
 }
 
 fn derive_key(pe: &Pe<'_>, count: usize, skip_shared: bool) -> Result<[u8; 16]> {
@@ -108,7 +135,8 @@ fn decode_metadata(
     );
     let packed_size = u32_at(header, 4)? as usize;
     ensure!(packed_size > 0, "empty metadata ciphertext");
-    let expected = expanded_size(u32_at(header, 8)? as usize)?;
+    let expected = u32_at(header, 8)? as usize;
+    ensure!(expected > 0, "empty metadata plaintext");
     let ciphertext = pe.read(
         rva.checked_add(28).context("metadata RVA overflow")?,
         packed_size,
@@ -153,7 +181,7 @@ fn decode_metadata(
     for (index, raw) in table.as_chunks::<80>().0.iter().enumerate() {
         let expanded_size = u32_at(raw, 12)? as usize;
         if raw[0] != 0 {
-            crate::common::codec::expanded_size(expanded_size)?;
+            ensure!(expanded_size > 0, "empty enabled section descriptor");
         }
         descriptors.push(Descriptor {
             index,
@@ -170,15 +198,17 @@ fn decode_metadata(
     // Project serialized bytes using the Loader reader's copy operations.
     let mut at = table_at + table.len();
     let records20 = u32_at(&plain, at)? as usize;
-    ensure!(records20 <= 0x10000, "invalid 20-byte record count");
     at += 4;
-    take(&plain, at, records20 * 20)?;
-    at += records20 * 20;
+    let records20_bytes = records20
+        .checked_mul(20)
+        .context("20-byte record table overflow")?;
+    take(&plain, at, records20_bytes)?;
+    at += records20_bytes;
     let pairs = u32_at(&plain, at)? as usize;
-    ensure!(pairs <= 0x10000, "invalid pair count");
     at += 4;
-    take(&plain, at, pairs * 8)?;
-    at += pairs * 8;
+    let pairs_bytes = pairs.checked_mul(8).context("pair table overflow")?;
+    take(&plain, at, pairs_bytes)?;
+    at += pairs_bytes;
     let ctx = if let Some(layout) = layout.as_ref() {
         ensure!(
             plain.len() - at == layout.copies.iter().map(|(_, size)| size).sum::<usize>(),
@@ -189,7 +219,7 @@ fn decode_metadata(
             .iter()
             .map(|(dest, size)| dest + size)
             .max()
-            .unwrap();
+            .context("empty Loader projection")?;
         let mut ctx = vec![0; size];
         for &(dest, size) in &layout.copies {
             ctx[dest..dest + size].copy_from_slice(take(&plain, at, size)?);
@@ -207,3 +237,7 @@ fn decode_metadata(
         layout,
     })
 }
+
+#[cfg(test)]
+#[path = "../../tests/unpack/config.rs"]
+mod tests;

@@ -130,5 +130,5 @@ fn find(
 }
 
 #[cfg(test)]
-#[path = "../../test/cpu_search.rs"]
+#[path = "../../tests/unpack/cpu_search.rs"]
 mod tests;
