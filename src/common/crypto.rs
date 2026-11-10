@@ -1,4 +1,4 @@
-//! RC4 shared by configuration decoding (16 bytes) and sections (16/32 bytes).
+//! RC4 shared by configuration decoding (16 bytes), sections (16/32 bytes) and EVB tables.
 
 pub struct Rc4 {
     state: [u8; 256],
@@ -6,7 +6,20 @@ pub struct Rc4 {
     j: u8,
 }
 
+impl std::fmt::Debug for Rc4 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Rc4([redacted])")
+    }
+}
+
 impl Rc4 {
+    /// Start PRGA directly from a stored 256-byte state table without KSA.
+    #[must_use]
+    pub const fn from_state(state: [u8; 256]) -> Self {
+        Self { state, i: 0, j: 0 }
+    }
+
+    #[must_use]
     pub fn new(key: &[u8]) -> Self {
         assert!(!key.is_empty(), "RC4 key cannot be empty");
         let mut state = std::array::from_fn(|i| i as u8);
@@ -34,12 +47,14 @@ impl Rc4 {
     }
 }
 
+#[must_use]
 pub fn decipher(data: &[u8], key: &[u8]) -> Vec<u8> {
     let mut result = data.to_vec();
     Rc4::new(key).apply(&mut result);
     result
 }
 
+#[must_use]
 pub fn section_key(seed: &[u8; 16], salt: u32) -> [u8; 32] {
     let mut key = [0; 32];
     key[..16].copy_from_slice(seed);
@@ -54,7 +69,14 @@ pub struct SectionProbe {
     seed: [u8; 16],
 }
 
+impl std::fmt::Debug for SectionProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SectionProbe([redacted])")
+    }
+}
+
 impl SectionProbe {
+    #[must_use]
     pub fn new(seed: [u8; 16]) -> Self {
         let mut state = std::array::from_fn(|i| i as u8);
         let mut j = 0u8;
@@ -70,6 +92,7 @@ impl SectionProbe {
     }
 
     #[inline]
+    #[must_use]
     pub fn cipher(&self, salt: u32) -> Rc4 {
         let key = section_key(&self.seed, salt);
         let mut state = self.initial;
@@ -98,3 +121,7 @@ impl SectionProbe {
         states.map(|state| Rc4 { state, i: 0, j: 0 })
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/crypto.rs"]
+mod tests;

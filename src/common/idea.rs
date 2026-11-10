@@ -5,6 +5,12 @@ pub struct Idea {
     dec: [u16; 52],
 }
 
+impl std::fmt::Debug for Idea {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Idea([redacted])")
+    }
+}
+
 fn mul(a: u16, b: u16) -> u16 {
     let a = if a == 0 { 65536 } else { a as u64 };
     let b = if b == 0 { 65536 } else { b as u64 };
@@ -52,6 +58,7 @@ fn block(input: &[u8; 8], k: &[u16; 52]) -> [u8; 8] {
 }
 
 impl Idea {
+    #[must_use]
     pub fn new(key: &[u8; 16]) -> Self {
         let mut enc = [0; 52];
         let mut state = u128::from_be_bytes(*key);
@@ -77,13 +84,17 @@ impl Idea {
         Self { enc, dec }
     }
 
+    #[must_use]
     pub fn encrypt_block(&self, data: &[u8; 8]) -> [u8; 8] {
         block(data, &self.enc)
     }
+
+    #[must_use]
     pub fn decrypt_block(&self, data: &[u8; 8]) -> [u8; 8] {
         block(data, &self.dec)
     }
 
+    #[must_use]
     pub fn decrypt(&self, data: &[u8]) -> Vec<u8> {
         let mut feedback = self.encrypt_block(&[0; 8]);
         let mut output = Vec::with_capacity(data.len());
@@ -108,3 +119,7 @@ impl Idea {
         output
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/idea.rs"]
+mod tests;

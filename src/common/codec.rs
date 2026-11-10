@@ -1,15 +1,8 @@
-//! Bounded translation of the Enigma LZ stream and E8/E9/FF25 inverse filter.
+//! Translation of the Enigma LZ stream and E8/E9/FF25 inverse filter.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
-pub const MAX_EXPANDED: usize = 256 * 1024 * 1024;
-
-pub fn expanded_size(size: usize) -> Result<usize> {
-    if size == 0 || size > MAX_EXPANDED {
-        bail!("invalid expanded size {size:#x} (limit {MAX_EXPANDED:#x})");
-    }
-    Ok(size)
-}
+use super::io::{put_u32_at, u32_at};
 
 struct Bits<'a> {
     data: &'a [u8],
@@ -46,14 +39,17 @@ impl<'a> Bits<'a> {
         Ok(result)
     }
     fn gamma(&mut self) -> Result<usize> {
-        let mut value = 1usize;
-        for _ in 0..31 {
-            value = (value << 1) | self.bit()? as usize;
+        let mut value = 1u32;
+        loop {
+            let bit = self.bit()?;
+            value = value
+                .checked_mul(2)
+                .and_then(|v| v.checked_add(bit))
+                .context("LZ gamma code exceeds 32 bits")?;
             if self.bit()? == 0 {
-                return Ok(value);
+                return Ok(value as usize);
             }
         }
-        bail!("LZ gamma code exceeds 32 bits")
     }
 }
 
@@ -74,7 +70,7 @@ fn copy(output: &mut Vec<u8>, distance: usize, length: usize, limit: usize) -> R
 
 /// Loader streams may contain block padding; configuration/section streams are strict.
 pub fn decompress(data: &[u8], expected: usize, strict: bool) -> Result<Vec<u8>> {
-    expanded_size(expected)?;
+    ensure!(expected > 0, "empty LZ output");
     let mut input = Bits::new(data);
     let mut output = Vec::with_capacity(expected);
     output.push(input.byte()?);
@@ -144,13 +140,15 @@ pub fn fix_branches(data: &mut [u8]) {
     let mut counter = 0u32;
     // Preserve the original loop's remaining > 1 after subtracting five.
     while pos + 6 < data.len() {
-        if data[pos] == 0xe8 || data[pos] == 0xe9 {
-            let old = u32::from_le_bytes(data[pos + 1..pos + 5].try_into().unwrap());
-            data[pos + 1..pos + 5].copy_from_slice(&old.wrapping_sub(pos as u32).to_le_bytes());
+        if (data[pos] == 0xe8 || data[pos] == 0xe9)
+            && let Ok(old) = u32_at(data, pos + 1)
+        {
+            let _ = put_u32_at(data, pos + 1, old.wrapping_sub(pos as u32));
             pos += 5;
-        } else if data[pos..pos + 2] == [0xff, 0x25] {
-            let old = u32::from_le_bytes(data[pos + 2..pos + 6].try_into().unwrap());
-            data[pos + 2..pos + 6].copy_from_slice(&old.wrapping_sub(counter).to_le_bytes());
+        } else if data[pos..pos + 2] == [0xff, 0x25]
+            && let Ok(old) = u32_at(data, pos + 2)
+        {
+            let _ = put_u32_at(data, pos + 2, old.wrapping_sub(counter));
             counter = counter.wrapping_sub(4);
             pos += 6;
         } else {
@@ -161,6 +159,7 @@ pub fn fix_branches(data: &mut [u8]) {
 
 /// Reject structurally impossible LZ prefixes without expanding data. Exhausting
 /// a prefix is inconclusive, never a rejection. Used only as a salt prefilter.
+#[must_use]
 pub fn plausible_prefix(data: &[u8], packed_size: usize, expected: usize) -> bool {
     fn check(data: &[u8], packed_size: usize, expected: usize) -> Option<bool> {
         let mut input = Bits::new(data);
@@ -228,3 +227,7 @@ pub fn plausible_prefix(data: &[u8], packed_size: usize, expected: usize) -> boo
     }
     check(data, packed_size, expected).unwrap_or(true)
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/codec.rs"]
+mod tests;

@@ -45,6 +45,57 @@ pub fn put_u64_at(data: &mut [u8], offset: usize, value: u64) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+pub struct Cursor<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    #[must_use]
+    pub const fn new(data: &'a [u8]) -> Self {
+        Self { data, at: 0 }
+    }
+
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        self.at
+    }
+
+    pub fn read(&mut self, n: usize) -> Result<&'a [u8]> {
+        let bytes = take(self.data, self.at, n)?;
+        self.at += n;
+        Ok(bytes)
+    }
+
+    pub fn byte(&mut self) -> Result<u8> {
+        Ok(self.read(1)?[0])
+    }
+
+    pub fn word(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.read(2)?.try_into()?))
+    }
+
+    pub fn dword(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.read(4)?.try_into()?))
+    }
+
+    pub fn qword(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.read(8)?.try_into()?))
+    }
+
+    pub fn utf16z(&mut self) -> Result<String> {
+        let mut words = Vec::new();
+        loop {
+            let word = self.word()?;
+            if word == 0 {
+                return Ok(String::from_utf16(&words)?);
+            }
+            words.push(word);
+        }
+    }
+}
+
 pub fn read_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read {}", path.display()))
 }
@@ -103,5 +154,5 @@ pub fn publish_directory(directory: &Path, write: impl FnOnce(&Path) -> Result<(
 }
 
 #[cfg(test)]
-#[path = "../../test/output.rs"]
+#[path = "../../tests/common/io.rs"]
 mod tests;

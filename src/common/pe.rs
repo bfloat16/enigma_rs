@@ -1,8 +1,11 @@
+//! PE32/PE32+ header parsing, RVA mapping, import table inspection and checksum.
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail, ensure};
 
 use super::io::{take, u16_at, u32_at, u64_at};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Section {
     pub rva: u32,
     pub virtual_size: u32,
@@ -12,6 +15,7 @@ pub struct Section {
     pub header_offset: usize,
 }
 
+#[derive(Clone)]
 pub struct Pe<'a> {
     pub data: &'a [u8],
     pub nt: usize,
@@ -25,6 +29,18 @@ pub struct Pe<'a> {
     pub sections: Vec<Section>,
 }
 
+impl std::fmt::Debug for Pe<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pe")
+            .field("is_64", &self.is_64)
+            .field("entry", &self.entry)
+            .field("image_base", &self.image_base)
+            .field("image_size", &self.image_size)
+            .field("sections", &self.sections)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> Pe<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         ensure!(take(data, 0, 2)? == b"MZ", "missing MZ signature");
@@ -32,10 +48,7 @@ impl<'a> Pe<'a> {
         ensure!(take(data, nt, 4)? == b"PE\0\0", "missing PE signature");
         let machine = u16_at(data, nt + 4)?;
         let count = u16_at(data, nt + 6)? as usize;
-        ensure!(
-            (1..=1024).contains(&count),
-            "invalid PE section count {count}"
-        );
+        ensure!(count > 0, "empty PE section table");
         let optional = nt + 24;
         let optional_size = u16_at(data, nt + 20)? as usize;
         ensure!(optional_size >= 96, "truncated optional header");
@@ -98,6 +111,7 @@ impl<'a> Pe<'a> {
         })
     }
 
+    #[must_use]
     pub fn section_at(&self, rva: u32) -> Option<&Section> {
         // Choose the highest preceding RVA to handle overlapping raw extents.
         self.sections
@@ -136,8 +150,76 @@ impl<'a> Pe<'a> {
         let offset = section.raw_offset as usize + delta;
         take(self.data, offset, size)
     }
+
+    /// Map imported IAT slot VAs to their symbol names for bootstrap analysis.
+    pub fn imported_names(&self) -> Result<HashMap<u64, String>> {
+        let mut result = HashMap::new();
+        let mut descriptor = u32_at(
+            self.data,
+            self.optional + if self.is_64 { 120 } else { 104 },
+        )?;
+        if descriptor == 0 {
+            return Ok(result);
+        }
+        let width = if self.is_64 { 8u32 } else { 4 };
+        let ordinal_flag = 1u64 << (width * 8 - 1);
+        loop {
+            let record = self.read(descriptor, 20)?;
+            if record == [0; 20] {
+                return Ok(result);
+            }
+            let iat = u32_at(record, 16)?;
+            let lookup = u32_at(record, 0)?;
+            let mut thunk_rva = if lookup == 0 { iat } else { lookup };
+            let mut slot_va = self
+                .image_base
+                .checked_add(u64::from(iat))
+                .context("import IAT VA overflow")?;
+            loop {
+                let thunk = if self.is_64 {
+                    u64_at(self.read(thunk_rva, 8)?, 0)?
+                } else {
+                    u64::from(u32_at(self.read(thunk_rva, 4)?, 0)?)
+                };
+                if thunk == 0 {
+                    break;
+                }
+                if thunk & ordinal_flag == 0 {
+                    let name_rva = u32::try_from(thunk)?
+                        .checked_add(2)
+                        .context("import name RVA overflow")?;
+                    let mut bytes = Vec::new();
+                    let mut offset = 0u32;
+                    loop {
+                        let byte = self.read(
+                            name_rva
+                                .checked_add(offset)
+                                .context("import name RVA overflow")?,
+                            1,
+                        )?[0];
+                        if byte == 0 {
+                            break;
+                        }
+                        bytes.push(byte);
+                        offset += 1;
+                    }
+                    result.insert(slot_va, String::from_utf8(bytes)?);
+                }
+                thunk_rva = thunk_rva
+                    .checked_add(width)
+                    .context("import thunk RVA overflow")?;
+                slot_va = slot_va
+                    .checked_add(u64::from(width))
+                    .context("import slot VA overflow")?;
+            }
+            descriptor = descriptor
+                .checked_add(20)
+                .context("import descriptor RVA overflow")?;
+        }
+    }
 }
 
+#[must_use]
 pub fn checksum(bytes: &[u8], field: usize) -> u32 {
     let mut sum = 0u64;
     for (i, chunk) in bytes.chunks(2).enumerate() {
@@ -152,3 +234,7 @@ pub fn checksum(bytes: &[u8], field: usize) -> u32 {
     sum = (sum & 0xffff) + (sum >> 16);
     (sum as u32).wrapping_add(bytes.len() as u32)
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/pe.rs"]
+mod tests;
