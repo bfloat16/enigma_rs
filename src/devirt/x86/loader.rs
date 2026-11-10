@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use iced_x86::{Decoder, DecoderOptions, Mnemonic as M, OpKind, Register};
 
 #[cfg(test)]
-#[path = "../../../test/devirt/x86/loader.rs"]
+#[path = "../../../tests/devirt/x86/loader.rs"]
 mod tests;
 
 pub(super) struct Bootstrap {
@@ -227,7 +227,7 @@ impl Tokens<'_> {
                 continue;
             }
             let end = u32_at(branch, 28)? as usize;
-            if end <= index + 8 || end > self.records.len() || end - index > 128 {
+            if end <= index + 8 || end > self.records.len() {
                 continue;
             }
             for call in index + 8..end - 1 {
@@ -273,13 +273,9 @@ impl Tokens<'_> {
                                 )
                             });
                             let output = self.extension_inputs(&mut image, call - 2, inputs)?;
-                            append &= output[0].get()
-                                == Some(
-                                    inputs[0]
-                                        .get()
-                                        .unwrap()
-                                        .wrapping_add(inputs[cursor].get().unwrap()),
-                                )
+                            let left = inputs[0].require("extension input 0")?;
+                            let right = inputs[cursor].require("extension cursor input")?;
+                            append &= output[0].get() == Some(left.wrapping_add(right))
                                 && output[1..] == inputs[1..];
                         }
                     }
@@ -625,7 +621,7 @@ impl Tokens<'_> {
             let Some(value) = output[register].get() else {
                 return Ok(None);
             };
-            let delta = value.wrapping_sub(input[register].get().unwrap());
+            let delta = value.wrapping_sub(input[register].require("extension seed input")?);
             if output
                 .iter()
                 .zip(input)
@@ -701,7 +697,7 @@ impl Tokens<'_> {
             let Some(size) = self.scalar(&mut image, index - 5, 3)? else {
                 continue;
             };
-            if !(8..=0x100000).contains(&size) {
+            if size < 8 {
                 continue;
             }
             if !self.register_copy(&mut image, index - 2, 1, 3)?
@@ -712,7 +708,7 @@ impl Tokens<'_> {
             let Some(dest) = self.register_offset(&mut image, index - 3, 0)? else {
                 continue;
             };
-            if !(1..0x100000).contains(&dest) {
+            if dest == 0 {
                 continue;
             }
             if last.and_then(|previous: usize| previous.checked_add(7)) != Some(index) {
@@ -720,21 +716,31 @@ impl Tokens<'_> {
             }
             groups
                 .last_mut()
-                .unwrap()
+                .context("missing configuration projection group")?
                 .push((dest as usize, size as usize));
             last = Some(index);
         }
         groups.retain(|g| {
             g.len() >= 3
-                && g.last().is_some_and(|&(_, n)| n > 0x1000)
                 && g.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0)
+                && g.last()
+                    .and_then(|&(_, last_size)| {
+                        g[..g.len() - 1]
+                            .iter()
+                            .map(|&(_, s)| s)
+                            .max()
+                            .map(|prev| last_size > prev)
+                    })
+                    .unwrap_or(false)
         });
         ensure!(
             groups.len() == 1,
             "cannot uniquely derive configuration reader: {} projections",
             groups.len()
         );
-        Ok(groups.pop().unwrap())
+        groups
+            .pop()
+            .context("missing configuration projection group")
     }
 
     /// Recover the registry's count and stride from its lookup loop, then
@@ -764,7 +770,7 @@ impl Tokens<'_> {
             let Some(count) = self.scalar(&mut image, index - 1, 6)? else {
                 continue;
             };
-            if !(1..=65536).contains(&count) {
+            if count == 0 {
                 continue;
             }
             for end in index + 4..(index + 64).min(self.records.len() - 1) {
@@ -794,7 +800,7 @@ impl Tokens<'_> {
                     break;
                 };
                 ensure!(
-                    (4..=1024).contains(&stride) && stride.is_multiple_of(4),
+                    stride >= 4 && stride.is_multiple_of(4),
                     "invalid API registry stride"
                 );
                 registries.push((names, hooks, count as usize, stride as usize));
@@ -866,26 +872,25 @@ impl Tokens<'_> {
             "cannot uniquely derive API replacement column"
         );
         let mut result = std::collections::HashMap::new();
-        for (index, token) in columns.pop().unwrap().into_iter().enumerate() {
-            let mut strings = Vec::new();
-            for field in 0..2 {
+        let column = columns.pop().context("missing API replacement column")?;
+        for (index, token) in column.into_iter().enumerate() {
+            let mut strings = [String::new(), String::new()];
+            for (field, slot) in strings.iter_mut().enumerate() {
                 let at = u32_at(self.image, names + index * 8 + field * 4)?
                     .checked_sub(BASE)
                     .context("API name below Loader")? as usize;
                 let bytes = self.image.get(at..).context("API name outside Loader")?;
                 let length = bytes
                     .iter()
-                    .take(4096)
                     .position(|&b| b == 0)
                     .context("unterminated API name")?;
                 ensure!(
                     length > 0 && bytes[..length].iter().all(|b| (32..127).contains(b)),
                     "invalid API name"
                 );
-                strings.push(String::from_utf8(bytes[..length].to_vec())?);
+                *slot = String::from_utf8(bytes[..length].to_vec())?;
             }
-            let name = strings.pop().unwrap();
-            let dll = strings.pop().unwrap();
+            let [dll, name] = strings;
             ensure!(
                 result.insert(token, (dll, name)).is_none(),
                 "duplicate API replacement token"

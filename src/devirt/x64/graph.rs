@@ -4,7 +4,7 @@ use super::{
     lift::{Predicate, Store},
     switch::{Boundary, Session},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::VecDeque;
 
@@ -93,11 +93,6 @@ impl Graph {
                 )?;
             }
             processed += 1;
-            ensure!(
-                blocks.len() <= 65536,
-                "lifted VM CFG exceeds block bounds: {} > 65536",
-                blocks.len()
-            );
             let boundaries = session.advance(state)?;
             for boundary in boundaries {
                 let boundary = match boundary {
@@ -109,7 +104,7 @@ impl Graph {
                     other => other,
                 };
                 let path = match boundary {
-                    Boundary::Continue(mut state) => {
+                    Boundary::Continue(mut state) | Boundary::Case { mut state, .. } => {
                         let generalize = state.guest_sp.is_some();
                         if generalize {
                             state.retire_stack(&mut session.expressions)?;
@@ -247,7 +242,6 @@ impl Graph {
                             end: End::Next(next),
                         }
                     }
-                    Boundary::Case { .. } => unreachable!(),
                     Boundary::Host { state, target } => Path {
                         conditions: state.conditions,
                         stores: state.stores,
@@ -350,7 +344,6 @@ impl Graph {
             assignments.push((slot, *value));
             *value = input;
         }
-        ensure!(*slots <= 32768, "lifted VM storage exceeds bounds");
         Ok(())
     }
 

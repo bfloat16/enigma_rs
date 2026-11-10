@@ -313,7 +313,7 @@ impl Emitter<'_> {
                     M::Sar => shift!(sar),
                     M::Rol => shift!(rol),
                     M::Ror => shift!(ror),
-                    _ => unreachable!(),
+                    _ => bail!("unsupported native shift operation {op:?}"),
                 }
             }
             M::Mul => {
@@ -467,7 +467,7 @@ impl Emitter<'_> {
                     _ => bail!("unsupported native load width {width}"),
                 }
             }
-            _ => unreachable!(),
+            other => bail!("unexpected non-temporary expression {other:?}"),
         }
         self.asm.mov(dword_ptr(esi + self.layout.temps[&id]), eax)?;
         Ok(())
@@ -737,7 +737,11 @@ pub(crate) fn emit(
             format!("{:?}, blocks={}", graph.start, graph.blocks.len()),
         )?;
         let layout = Layout::new(graph)?;
-        asm.set_label(labels.get_mut(&graph.start).unwrap())?;
+        asm.set_label(
+            labels
+                .get_mut(&graph.start)
+                .context("missing native function label")?,
+        )?;
         prologue(&mut asm, graph, &layout)?;
         let mut blocks = (0..graph.blocks.len())
             .map(|_| asm.create_label())
@@ -854,5 +858,5 @@ pub(crate) fn verify(bytes: &[u8], base: u32) -> Result<()> {
     Ok(())
 }
 #[cfg(test)]
-#[path = "../../../test/devirt/x86/native_codegen.rs"]
+#[path = "../../../tests/devirt/x86/codegen.rs"]
 mod tests;

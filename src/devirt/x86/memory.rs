@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 const BITS: u32 = 5;
 const CELLS: usize = 1 << BITS;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Page {
     present: u32,
     values: [Value; CELLS],
@@ -18,7 +18,7 @@ impl Default for Page {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Memory {
     pages: Vec<(u32, Arc<Page>)>,
     shift: u32,
@@ -48,6 +48,7 @@ impl Memory {
     pub fn contains_key(&self, address: u32) -> bool {
         self.get(address).is_some()
     }
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.length
     }
@@ -190,5 +191,5 @@ impl Memory {
 }
 
 #[cfg(test)]
-#[path = "../../../test/devirt/x86/paged_memory.rs"]
+#[path = "../../../tests/devirt/x86/memory.rs"]
 mod tests;

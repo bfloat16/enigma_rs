@@ -5,7 +5,7 @@ use super::{
     profile::Profile,
     switch::Session,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use std::{
     collections::{HashSet, VecDeque},
     sync::Arc,
@@ -32,7 +32,6 @@ pub(super) fn compile(
         if !visited.insert(start) {
             continue;
         }
-        ensure!(graphs.len() < 4096, "native VM continuations exceed bounds");
         budget.check(
             "function queue",
             format!(

@@ -792,7 +792,7 @@ impl StateExpressions {
                 image,
                 temporary,
                 i.memory_size().size() as u32,
-                guest_numeric.unwrap(),
+                guest_numeric.context("missing guest operand value")?,
             );
             let branch = x86::execute(&mut self.cpu, image, &modified)?;
             let value = self

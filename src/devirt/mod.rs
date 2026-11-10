@@ -2,7 +2,6 @@
 
 mod analysis;
 mod budget;
-#[path = "cfg/partition.rs"]
 mod partition;
 pub mod x64;
 pub mod x86;

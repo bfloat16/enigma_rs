@@ -68,6 +68,7 @@ impl Session {
             || (self.dispatch..self.stop.saturating_add(0x2000)).contains(&value)
     }
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     pub fn synthetic_program(bytes: Vec<u8>) -> Self {
         let mut session = Self::synthetic(Expressions::default());
         session.entry = 0x1000;
@@ -130,6 +131,7 @@ impl Session {
         Ok(())
     }
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     pub fn synthetic(mut expressions: Expressions) -> Self {
         let stack = 0x20080000;
         let initial = StateExpressions::new(
@@ -462,7 +464,9 @@ impl Session {
                 offset.context("VM initializer did not expose all x86 registers and flags")
             })
             .collect::<Result<Vec<_>>>()?;
-        let layout: [u32; 9] = layout.try_into().unwrap();
+        let layout: [u32; 9] = layout
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("incomplete guest register layout"))?;
         let sp = self.word(state, frame + layout[4])?;
         let sp = self.expressions.intern(Expr::GuestPointer(sp));
         state.write(&mut self.expressions, frame + layout[4], 4, sp);
@@ -910,5 +914,5 @@ impl Session {
 }
 
 #[cfg(test)]
-#[path = "../../../test/devirt/x86/template_runtime.rs"]
+#[path = "../../../tests/devirt/x86/switch.rs"]
 mod tests;

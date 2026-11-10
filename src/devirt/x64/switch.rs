@@ -67,6 +67,7 @@ impl Session {
             || (self.dispatch..self.stop.saturating_add(0x2000)).contains(&value)
     }
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     pub fn synthetic_program(bytes: Vec<u8>) -> Self {
         let stack = 0x200080000;
         let mut expressions = Expressions::default();
@@ -437,7 +438,9 @@ impl Session {
                 offset.context("VM initializer did not expose all x64 registers and flags")
             })
             .collect::<Result<Vec<_>>>()?;
-        let layout: [u64; 17] = layout.try_into().unwrap();
+        let layout: [u64; 17] = layout
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("incomplete guest register layout"))?;
         let sp = self.word(state, frame + layout[4])?;
         let sp = self.expressions.intern(Expr::GuestPointer(sp));
         state.write(&mut self.expressions, frame + layout[4], 8, sp);

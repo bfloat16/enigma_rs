@@ -17,6 +17,16 @@ pub struct Analysis {
     output_rva: u32,
 }
 
+impl std::fmt::Debug for Analysis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Analysis")
+            .field("loader_len", &self.loader.len())
+            .field("has_header", &self.header.is_some())
+            .field("output_rva", &self.output_rva)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Analysis {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let pe = Pe::parse(bytes)?;

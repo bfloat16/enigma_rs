@@ -137,8 +137,8 @@ impl Value {
             && let Some(b) = other.candidates()
         {
             let values = [a[0], a[1], b[0], b[1]];
-            let lo = *values.iter().min().unwrap();
-            let hi = *values.iter().max().unwrap();
+            let lo = values[0].min(values[1]).min(values[2]).min(values[3]);
+            let hi = values[0].max(values[1]).max(values[2]).max(values[3]);
             if values.iter().all(|&v| v == lo || v == hi) {
                 return Self::pair(lo, hi);
             }
@@ -188,8 +188,8 @@ impl Value {
         let a = self.candidates()?;
         let b = other.candidates()?;
         let values = [f(a[0], b[0]), f(a[0], b[1]), f(a[1], b[0]), f(a[1], b[1])];
-        let lo = *values.iter().min().unwrap();
-        let hi = *values.iter().max().unwrap();
+        let lo = values[0].min(values[1]).min(values[2]).min(values[3]);
+        let hi = values[0].max(values[1]).max(values[2]).max(values[3]);
         (values.iter().all(|&v| v == lo || v == hi)).then(|| Self::pair(lo, hi))
     }
     fn op(self, other: Self, op: M, width: u64) -> Self {
@@ -215,7 +215,7 @@ impl Value {
             M::And | M::Test => a & b,
             M::Or => a | b,
             M::Xor => a ^ b,
-            _ => unreachable!(),
+            _ => 0,
         }) {
             return value;
         }
@@ -235,7 +235,7 @@ impl Value {
                         M::Add => a.wrapping_add(b),
                         M::Sub | M::Cmp => a.wrapping_sub(b),
                         M::Imul => a.wrapping_mul(b),
-                        _ => unreachable!(),
+                        _ => 0,
                     };
                     return Self::constant(v & mask);
                 }
@@ -273,7 +273,7 @@ impl Image {
         // Decode only to identify basic-block leaders; each reached instruction
         // is decoded independently too, so embedded constants are never executed.
         let mut decoder = Decoder::with_ip(64, &bytes, address, DecoderOptions::NONE);
-        while bytes.len() <= 0x10000 && decoder.can_decode() {
+        while decoder.can_decode() {
             let i = decoder.decode();
             match i.flow_control() {
                 FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch => {
@@ -370,7 +370,7 @@ impl Image {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct State {
     pub pc: u64,
     pub registers: [Value; 16],
@@ -774,7 +774,7 @@ fn shift(state: &mut State, op: M, a: Value, b: Value, w: u64) -> Value {
         }
         M::Rol => ((v << c) | (v >> (w - c))) & mask,
         M::Ror => ((v >> c) | (v << (w - c))) & mask,
-        _ => unreachable!(),
+        _ => v,
     };
     let value = a
         .candidates()
@@ -804,7 +804,7 @@ fn shift(state: &mut State, op: M, a: Value, b: Value, w: u64) -> Value {
                     (a.bits >> c) | (a.bits << (w - c)),
                     (a.known >> c) | (a.known << (w - c)),
                 ),
-                _ => unreachable!(),
+                _ => (0, 0),
             };
             Value {
                 bits: bits & known & mask,
@@ -958,8 +958,8 @@ pub(crate) fn execute(state: &mut State, image: &Image, i: &Instruction) -> Resu
                 None
             };
             for (n, value) in [(0, b), (1, a)] {
-                if i.op_kind(n) == OpKind::Memory {
-                    state.write(image, at.unwrap(), i.memory_size().size() as u64, value);
+                if let Some(at) = at.filter(|_| i.op_kind(n) == OpKind::Memory) {
+                    state.write(image, at, i.memory_size().size() as u64, value);
                 } else {
                     assign(state, image, i, n, value)?;
                 }
@@ -1050,7 +1050,7 @@ pub(crate) fn execute(state: &mut State, image: &Image, i: &Instruction) -> Resu
                     },
                     |[a, b]| Value::pair(a.swap_bytes() >> (64 - w), b.swap_bytes() >> (64 - w)),
                 ),
-                _ => unreachable!(),
+                _ => a,
             };
             if matches!(m, M::Inc | M::Dec) {
                 let cf = state.flags.bit(CF);
@@ -1230,9 +1230,7 @@ fn enqueue(
     queue: &mut VecDeque<Key>,
     image: &Image,
     mut state: State,
-    retained_words: &mut usize,
 ) -> Result<Key> {
-    ensure!(state.memory.len() <= 32768, "static memory-state limit");
     let esp = state.esp()?;
     state.calls.retain(|&(at, _)| at >= esp);
     let mut memory = if state.exact_memory {
@@ -1266,20 +1264,13 @@ fn enqueue(
         bytes,
     };
     if let Some(previous) = states.get_mut(&key) {
-        let before = previous.memory.len();
         if previous.join(&state, image) {
             queue.push_back(key.clone());
         }
-        *retained_words += previous.memory.len() - before;
     } else {
-        *retained_words += state.memory.len();
         states.insert(key.clone(), state);
         queue.push_back(key.clone());
     }
-    ensure!(
-        *retained_words <= 16_777_216,
-        "static control-flow memory limit"
-    );
     Ok(key)
 }
 pub(crate) fn analyze(
@@ -1289,18 +1280,10 @@ pub(crate) fn analyze(
 ) -> Result<()> {
     let mut states = HashMap::new();
     let mut queue = VecDeque::new();
-    let mut instructions = 0;
-    let mut blocks = 0;
-    let mut retained_words = 0;
     let mut edges: HashMap<Key, HashSet<Key>> = HashMap::new();
-    enqueue(&mut states, &mut queue, image, initial, &mut retained_words)?;
+    enqueue(&mut states, &mut queue, image, initial)?;
     while let Some(key) = queue.pop_front() {
         let mut state = states[&key].clone();
-        blocks += 1;
-        ensure!(
-            blocks <= 200_000 && states.len() <= 100_000,
-            "static control-flow graph exceeds bounds"
-        );
         loop {
             let pc = state.pc;
             match hook(image, &mut state)
@@ -1310,19 +1293,14 @@ pub(crate) fn analyze(
                 Action::Decode => {}
             }
             let i = image.instruction(pc)?;
-            instructions += 1;
-            ensure!(
-                instructions <= 2_000_000,
-                "static instruction bound exceeded"
-            );
             if let Some(branch) = execute(&mut state, image, &i).with_context(|| {
                 format!("static {pc:#x} {:?}, VM step {}", i.mnemonic(), state.step)
             })? {
-                let next = enqueue(&mut states, &mut queue, image, branch, &mut retained_words)?;
+                let next = enqueue(&mut states, &mut queue, image, branch)?;
                 edges.entry(key.clone()).or_default().insert(next);
             }
             if i.flow_control() != FlowControl::Next || image.leaders.contains(&state.pc) {
-                let next = enqueue(&mut states, &mut queue, image, state, &mut retained_words)?;
+                let next = enqueue(&mut states, &mut queue, image, state)?;
                 edges.entry(key.clone()).or_default().insert(next);
                 break;
             }
@@ -1333,7 +1311,9 @@ pub(crate) fn analyze(
     let mut incoming: HashMap<Key, usize> = states.keys().map(|key| (key.clone(), 0)).collect();
     for successors in edges.values() {
         for successor in successors {
-            *incoming.get_mut(successor).unwrap() += 1;
+            if let Some(n) = incoming.get_mut(successor) {
+                *n += 1;
+            }
         }
     }
     let mut ready: VecDeque<_> = incoming
@@ -1345,10 +1325,11 @@ pub(crate) fn analyze(
         visited += 1;
         if let Some(next) = edges.get(&key) {
             for successor in next {
-                let n = incoming.get_mut(successor).unwrap();
-                *n -= 1;
-                if *n == 0 {
-                    ready.push_back(successor.clone());
+                if let Some(n) = incoming.get_mut(successor) {
+                    *n -= 1;
+                    if *n == 0 {
+                        ready.push_back(successor.clone());
+                    }
                 }
             }
         }
@@ -1361,5 +1342,5 @@ pub(crate) fn analyze(
 }
 
 #[cfg(test)]
-#[path = "../../../test/devirt/x64/cpu.rs"]
+#[path = "../../../tests/devirt/x64/cpu.rs"]
 mod tests;

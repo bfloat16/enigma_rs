@@ -162,11 +162,9 @@ fn optimize_round(graph: &mut Graph) -> Result<()> {
                 ),
             )?;
         }
-        ensure!(
-            iterations <= 300000,
-            "native semantic propagation exceeds bounds"
-        );
-        let facts = incoming[block].as_ref().unwrap().clone();
+        let Some(facts) = incoming[block].clone() else {
+            continue;
+        };
         for original in &graph.blocks[block].paths {
             let Some((path, outgoing)) =
                 rewrite_path(&mut graph.session.expressions, original, &facts)
@@ -303,5 +301,5 @@ fn optimize_round(graph: &mut Graph) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "../../../test/devirt/x86/semantic_cfg.rs"]
+#[path = "../../../tests/devirt/x86/optimize.rs"]
 mod tests;

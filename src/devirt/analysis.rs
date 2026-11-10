@@ -27,6 +27,7 @@ impl Architecture {
     }
 }
 
+#[derive(Debug)]
 pub enum Analysis {
     X86(x86::Analysis),
     X64(x64::Analysis),
@@ -57,6 +58,7 @@ impl Analysis {
 }
 
 /// Native code at an analysis RVA; external addresses refer to the input image.
+#[derive(Clone, Debug)]
 pub struct NativeCode {
     pub architecture: Architecture,
     pub source: u32,
@@ -138,5 +140,5 @@ impl NativeCode {
 }
 
 #[cfg(test)]
-#[path = "../../test/devirt/analysis.rs"]
+#[path = "../../tests/devirt/analysis.rs"]
 mod tests;

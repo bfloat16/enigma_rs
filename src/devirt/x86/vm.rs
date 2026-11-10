@@ -48,6 +48,18 @@ pub struct Tokens<'a> {
     pub serialized: usize,
     pub(super) image: &'a [u8],
 }
+
+impl std::fmt::Debug for Tokens<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tokens")
+            .field("dispatch", &self.dispatch)
+            .field("key", &self.key)
+            .field("records_len", &self.records.len())
+            .field("serialized", &self.serialized)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> Tokens<'a> {
     pub fn parse(image: &'a [u8]) -> Result<Self> {
         let bootstrap = super::loader::Bootstrap::parse(image)?;
@@ -58,7 +70,6 @@ impl<'a> Tokens<'a> {
             "invalid VM token table"
         );
         let count = (header - table) / 4;
-        ensure!(count <= 1_000_000, "oversized VM token table");
         let mut records = Vec::with_capacity(count);
         for i in 0..count {
             records.push(take(image, u32_at(image, table + i * 4)? as usize, 72)?);
@@ -173,7 +184,7 @@ impl<'a> Tokens<'a> {
                 let register = ((address - 0x41000000) / 0x100000) as usize;
                 let found = (
                     register,
-                    address.wrapping_sub(inputs[register].get().unwrap()),
+                    address.wrapping_sub(inputs[register].require("extension register input")?),
                     i.memory_size().size() as u32,
                 );
                 ensure!(
@@ -208,7 +219,7 @@ impl Profile {
             .context("VM length overflow")?;
         take(image, at, end.checked_sub(at).context("VM size underflow")?)?;
         let count = u32_at(image, at + 4)? as usize;
-        ensure!((1..=65536).contains(&count), "invalid VM stream count");
+        ensure!(count > 0, "invalid VM stream count");
         let stream_bytes = u32_at(image, at + 8)? as usize;
         let mut p = at + 12;
         let mut streams = Vec::new();
@@ -223,7 +234,6 @@ impl Profile {
         ensure!(p - (at + 12) == stream_bytes, "VM stream size mismatch");
         let n = u32_at(image, p)? as usize;
         p += 4;
-        ensure!(n <= 65536, "too many VM handlers");
         let mut handlers = HashMap::new();
         for _ in 0..n {
             let id = u32_at(image, p)?;
@@ -243,10 +253,7 @@ impl Profile {
         }
         p += 48;
         let size = patch[11] as usize;
-        ensure!(
-            p + size == end && size <= 0x10000,
-            "invalid VM dispatcher extent"
-        );
+        ensure!(p + size == end && size > 0, "invalid VM dispatcher extent");
         for &offset in &patch[..9] {
             ensure!(offset as usize + 4 <= size, "VM patch outside dispatcher");
         }
@@ -310,3 +317,7 @@ pub fn stub_token_at(loader: &[u8], rva: u32, key: u32, dispatch: u32) -> Result
     })?;
     token.context("IAT stub did not statically resolve to dispatcher")
 }
+
+#[cfg(test)]
+#[path = "../../../tests/devirt/x86/vm.rs"]
+mod tests;

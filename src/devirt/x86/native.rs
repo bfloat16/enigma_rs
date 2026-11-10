@@ -82,7 +82,6 @@ pub(super) fn compile(
         if !visited.insert(start) {
             continue;
         }
-        ensure!(graphs.len() < 4096, "native VM continuations exceed bounds");
         budget.check(
             "function queue",
             format!(

@@ -64,7 +64,6 @@ impl<'a> Runtime<'a> {
             "invalid x64 token table"
         );
         let count = (header - table) / 4;
-        ensure!(count <= 1_000_000, "oversized x64 token table");
         let mut records = Vec::new();
         for index in 0..count {
             records.push(take(image, u32_at(image, table + index * 4)? as usize, 88)?);
@@ -76,7 +75,7 @@ impl<'a> Runtime<'a> {
             .context("x64 template extent overflow")?;
         take(image, start, end - start)?;
         let count = u32_at(image, start + 4)? as usize;
-        ensure!((1..=65536).contains(&count), "invalid x64 stream count");
+        ensure!(count > 0, "invalid x64 stream count");
         let mut at = start + 12;
         let mut streams = Vec::new();
         for _ in 0..count {
@@ -93,7 +92,6 @@ impl<'a> Runtime<'a> {
         );
         let count = u32_at(image, at)? as usize;
         at += 4;
-        ensure!(count <= 65536, "too many x64 handlers");
         let mut handlers = HashMap::new();
         for _ in 0..count {
             let id = u32_at(image, at)?;
@@ -111,7 +109,7 @@ impl<'a> Runtime<'a> {
         }
         at += 48;
         ensure!(
-            at + patch[11] as usize == end && patch[11] <= 0x10000,
+            at + patch[11] as usize == end && patch[11] > 0,
             "invalid x64 dispatcher extent"
         );
         let dispatcher = take(image, at, patch[11] as usize)?.to_vec();
@@ -235,9 +233,10 @@ impl Machine<'_> {
                 "invalid x64 VM callback"
             );
             let index = (state.pc - CALLBACKS) / 16;
+            let esp = state.esp()?;
             let arg = |n: u64| {
                 state
-                    .read(&self.image, state.esp().unwrap() + 0x28 + n * 8, 8)
+                    .read(&self.image, esp + 0x28 + n * 8, 8)
                     .require("x64 VM callback argument")
             };
             let value = match index {
@@ -513,26 +512,37 @@ impl Runtime<'_> {
             }
             let size = u64_at(size, 56)? as usize;
             let dest = u64_at(dest, 56)? as usize;
-            if !(8..=0x100000).contains(&size) || dest == 0 || dest + size > 0x100000 {
+            if size < 8 || dest == 0 {
                 continue;
             }
             if last != Some(index - 8) {
                 groups.push(Vec::new());
             }
-            groups.last_mut().unwrap().push((dest, size));
+            groups
+                .last_mut()
+                .context("missing x64 projection group")?
+                .push((dest, size));
             last = Some(index);
         }
         groups.retain(|g| {
             g.len() >= 3
-                && g.last().unwrap().1 > 0x1000
                 && g.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0)
+                && g.last()
+                    .and_then(|&(_, last_size)| {
+                        g[..g.len() - 1]
+                            .iter()
+                            .map(|&(_, s)| s)
+                            .max()
+                            .map(|prev| last_size > prev)
+                    })
+                    .unwrap_or(false)
         });
         ensure!(
             groups.len() == 1,
             "ambiguous x64 config projection: {}",
             groups.len()
         );
-        Ok(groups.pop().unwrap())
+        groups.pop().context("missing x64 config projection")
     }
 }
 
@@ -584,10 +594,7 @@ impl Runtime<'_> {
                     let count = usize::try_from(u64_at(r, 56)?)?
                         .checked_add(1)
                         .context("hook count overflow")?;
-                    if (1..=1024).contains(&count)
-                        && (8..=1024).contains(&stride)
-                        && stride.is_multiple_of(8)
-                    {
+                    if count > 0 && stride >= 8 && stride.is_multiple_of(8) {
                         registries.push((names, hooks, stride, count));
                     }
                     break;
@@ -610,7 +617,6 @@ impl Runtime<'_> {
             let data = image.get(at..).context("API string outside runtime")?;
             let end = data
                 .iter()
-                .take(1024)
                 .position(|&b| b == 0)
                 .context("unterminated API string")?;
             ensure!(
@@ -651,7 +657,8 @@ impl Runtime<'_> {
             "ambiguous x64 API registry target column"
         );
         let mut result = HashMap::new();
-        for (index, target) in columns.pop().unwrap().into_iter().enumerate() {
+        let column = columns.pop().context("missing x64 API registry column")?;
+        for (index, target) in column.into_iter().enumerate() {
             result.insert(
                 target,
                 (
@@ -691,7 +698,7 @@ impl Runtime<'_> {
                 continue;
             }
             let end = usize::try_from(u64_at(branch, 32)?)?;
-            if end <= index + 12 || end > self.records.len() || end - index > 128 {
+            if end <= index + 12 || end > self.records.len() {
                 continue;
             }
             let append = self.records[end - 2];

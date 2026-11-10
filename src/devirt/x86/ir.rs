@@ -261,7 +261,7 @@ impl Expressions {
                             }
                             M::Rol => ((a << n) | (a >> (width - n))) & mask(width),
                             M::Ror => ((a >> n) | (a << (width - n))) & mask(width),
-                            _ => unreachable!(),
+                            _ => return None,
                         };
                         let sign = 1u32 << (width - 1);
                         let cf = match op {

@@ -51,15 +51,20 @@ fn virtual_protect_slots(image: &[u8], pe: &Pe<'_>) -> Result<HashSet<u32>> {
     let mut slots = HashSet::new();
     let mut descriptor = u32_at(image, pe.optional + 104)? as usize;
     ensure!(descriptor != 0, "Loader has no import directory");
-    for _ in 0..1024 {
+    loop {
         let iat = u32_at(image, descriptor + 16)?;
         if iat == 0 {
             return Ok(slots);
         }
         let names = u32_at(image, descriptor)?;
         let names = if names == 0 { iat } else { names };
-        for index in 0..65536 {
-            let name = u32_at(image, names as usize + index * 4)?;
+        let mut index = 0usize;
+        loop {
+            let offset = index
+                .checked_mul(4)
+                .and_then(|off| (names as usize).checked_add(off))
+                .context("Loader ILT offset overflow")?;
+            let name = u32_at(image, offset)?;
             if name == 0 {
                 break;
             }
@@ -69,14 +74,16 @@ fn virtual_protect_slots(image: &[u8], pe: &Pe<'_>) -> Result<HashSet<u32>> {
             {
                 slots.insert(
                     BASE.checked_add(iat)
-                        .and_then(|at| at.checked_add(index as u32 * 4))
+                        .and_then(|at| at.checked_add(u32::try_from(index * 4).ok()?))
                         .context("Loader IAT address overflow")?,
                 );
             }
+            index += 1;
         }
-        descriptor += 20;
+        descriptor = descriptor
+            .checked_add(20)
+            .context("Loader import descriptor overflow")?;
     }
-    anyhow::bail!("unterminated Loader import directory")
 }
 fn is_virtual_protect(image: &[u8], mut target: u32, slots: &HashSet<u32>) -> bool {
     for _ in 0..8 {
